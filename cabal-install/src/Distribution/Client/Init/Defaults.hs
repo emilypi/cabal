@@ -68,7 +68,7 @@ defaultTestDir :: String
 defaultTestDir = "test"
 
 defaultCabalVersion :: CabalSpecVersion
-defaultCabalVersion = CabalSpecV3_0
+defaultCabalVersion = CabalSpecV3_14
 
 defaultPackageType :: PackageType
 defaultPackageType = Executable
@@ -141,6 +141,7 @@ defaultCabalVersions =
   , CabalSpecV3_4
   , CabalSpecV3_14
   , CabalSpecV3_16
+  , CabalSpecV3_18
   ]
 
 defaultInitFlags :: InitFlags
