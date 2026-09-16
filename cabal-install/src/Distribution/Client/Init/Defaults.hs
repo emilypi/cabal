@@ -140,6 +140,7 @@ defaultCabalVersions =
   , CabalSpecV3_0
   , CabalSpecV3_4
   , CabalSpecV3_14
+  , CabalSpecV3_16
   ]
 
 defaultInitFlags :: InitFlags
