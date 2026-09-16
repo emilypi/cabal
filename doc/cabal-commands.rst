@@ -354,12 +354,21 @@ Initialization and download
 cabal init
 ^^^^^^^^^^
 
-``cabal init [FLAGS]`` initialises a Cabal package, picking
-reasonable defaults. Run it in your project folder.
+``cabal init [FLAGS]`` initialises a Cabal package, by default prompting the user for inputs, or choosing
+  sensible defaults to create a minimal project if specified. Run it in your project folder.
 
 .. option:: -i, --interactive
 
-    Enable interactive mode.
+    Enable interactive mode. This will prompt the user for inputs to help create the a minimal project.
+
+.. option:: -n, --non-interactive
+
+    Enable non-interactive mode. This will attempt to infer project details from a user configuration
+    or from basic environment variables, such as $PATH.
+
+.. option:: --simple
+
+    Create a simple, minimal project of a user-defined project type with sensible defaults.
 
 .. option:: -m, --minimal
 
@@ -825,6 +834,37 @@ and fully-qualified.
 
 .. _command-group-build:
 
+Build action phase control
+--------------------------
+
+The following settings apply to commands that result in build actions
+(``build``, ``run``, ``repl``, ``test``...), and control which phases of the
+build are executed.
+
+.. option:: --dry-run
+
+    Do not download, build, or install anything, only print what would happen.
+
+.. option:: --only-configure
+
+    Instead of performing a full build just run the configure step.
+    Only accepted by the ``build`` command.
+
+.. option:: --only-download
+
+    Do not build anything, only fetch the packages.
+
+.. option:: --only-dependencies
+            --dependencies-only
+
+    Install only the dependencies necessary to build the given packages.
+    Not accepted by the ``repl`` command.
+
+.. tip::
+
+    ``--dependencies-only`` is a synonym for ``--only-dependencies`` but the
+    latter is preferred as it follows the pattern of other ``--only-*`` flags.
+
 Project building and installing
 -------------------------------
 
@@ -1212,8 +1252,9 @@ When ``TARGET`` is one of the following:
 - Empty target: Same as package target, implicitly using the package from the current
   working directory.
 
-Except in the case of the empty target, the strings after it will be
-passed to the executable as arguments.
+With a non-empty target, the strings after it are passed to the
+executable as arguments.  With an empty target you must use ``--`` to
+separate executable arguments from cabal flags.
 
 If one of the arguments starts with ``-`` it will be interpreted as
 a cabal flag, so if you need to pass flags to the executable you
@@ -1222,6 +1263,10 @@ have to separate them with ``--``.
 ::
 
     $ cabal run target -- -a -bcd --argument
+    $ cabal run -- +RTS -s -RTS
+
+The second form (empty target with ``--``) runs the single executable
+in the current package and passes the RTS options to it.
 
 ``run`` supports running script files that use a certain format.
 Scripts look like:
@@ -1624,6 +1669,22 @@ to Hackage.
     Your Hackage authentication token. You can create and delete
     authentication tokens on Hackage's `account management page
     <https://hackage.haskell.org/users/account-management>`__.
+
+.. option:: -T COMMAND or -TCOMMAND, --token-command=COMMAND
+
+    Command to get your Hackage authentication token. This is useful if your
+    token is stored in a secrets manager, for example. Arguments with whitespace
+    must be quoted (double-quotes only). For example:
+
+    ::
+
+        --token-command='sh -c "op read op://hackage/upload-token"'
+
+    Or in the config file:
+
+    ::
+
+        token-command: sh -c "op read op://hackage/upload-token"
 
 .. option:: -u USERNAME or -uUSERNAME, --username=USERNAME
 

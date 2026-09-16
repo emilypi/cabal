@@ -1,8 +1,3 @@
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE RankNTypes #-}
-
------------------------------------------------------------------------------
-
 -- |
 -- Module      :  Distribution.Simple.Program.Db
 -- Copyright   :  Isaac Jones 2006, Duncan Coutts 2007-2009
@@ -33,6 +28,7 @@ module Distribution.Simple.Program.Db
     -- ** Query and manipulate the program db
   , addKnownProgram
   , addKnownPrograms
+  , clearUnconfiguredPrograms
   , prependProgramSearchPath
   , prependProgramSearchPathNoLogging
   , lookupKnownProgram
@@ -67,8 +63,11 @@ module Distribution.Simple.Program.Db
   , ConfiguredProgs
   , updateUnconfiguredProgs
   , updateConfiguredProgs
+  , updatePathProgDb
   ) where
 
+import Control.Monad ((<=<))
+import Data.Functor ((<&>))
 import Distribution.Compat.Prelude
 import Prelude ()
 
@@ -200,6 +199,14 @@ addKnownProgram prog =
 addKnownPrograms :: [Program] -> ProgramDb -> ProgramDb
 addKnownPrograms progs progdb = foldl' (flip addKnownProgram) progdb progs
 
+-- | Drop all unconfigured programs from a 'ProgramDb', retaining only
+-- configured programs, the search path, and environment overrides.
+--
+-- This mirrors round-tripping via the @'Binary' 'ProgramDb'@ instance, which
+-- drops unconfigured programs.
+clearUnconfiguredPrograms :: ProgramDb -> ProgramDb
+clearUnconfiguredPrograms progdb = progdb{unconfiguredProgs = Map.empty}
+
 lookupKnownProgram :: String -> ProgramDb -> Maybe Program
 lookupKnownProgram name =
   fmap (\(p, _, _) -> p) . Map.lookup name . unconfiguredProgs
@@ -257,8 +264,14 @@ prependProgramSearchPathNoLogging
   -> ProgramDb
   -> ProgramDb
 prependProgramSearchPathNoLogging extraPaths extraEnv db =
-  let db' = modifyProgramSearchPath (nub . (map ProgramSearchPathDir extraPaths ++)) db
-      db'' = db'{progOverrideEnv = extraEnv ++ progOverrideEnv db'}
+  let db' =
+        if null extraPaths
+          then db -- skip work if nothing to do
+          else modifyProgramSearchPath (nub . (map ProgramSearchPathDir extraPaths ++)) db
+      db'' =
+        if null extraEnv
+          then db' -- skip work if nothing to do
+          else db'{progOverrideEnv = extraEnv ++ progOverrideEnv db'}
    in db''
 
 -- | User-specify this path.  Basically override any path information
@@ -328,7 +341,7 @@ userSpecifyArgss argss progdb =
 -- | Get the path that has been previously specified for a program, if any.
 userSpecifiedPath :: Program -> ProgramDb -> Maybe FilePath
 userSpecifiedPath prog =
-  join . fmap (\(_, p, _) -> p) . Map.lookup (programName prog) . unconfiguredProgs
+  (\(_, p, _) -> p) <=< (Map.lookup (programName prog) . unconfiguredProgs)
 
 -- | Get any extra args that have been previously specified for a program.
 userSpecifiedArgs :: Program -> ProgramDb -> [ProgArg]
@@ -406,7 +419,7 @@ configureUnconfiguredProgram verbosity prog progdb = do
   maybeLocation <- case userSpecifiedPath prog progdb of
     Nothing ->
       programFindLocation prog verbosity (progSearchPath progdb)
-        >>= return . fmap (swap . fmap FoundOnSystem . swap)
+        <&> fmap (swap . fmap FoundOnSystem . swap)
     Just path -> do
       absolute <- doesExecutableExist path
       if absolute
@@ -482,6 +495,45 @@ reconfigurePrograms verbosity paths argss progdb = do
     $ progdb
   where
     progs = catMaybes [lookupKnownProgram name progdb | (name, _) <- paths]
+
+-- | Update the PATH and environment variables of already-configured programs
+-- in the program database.
+--
+-- This is a somewhat sketchy operation, but it handles the following situation:
+--
+--  - we add a build-tool-depends executable to the program database, with its
+--    associated data directory environment variables;
+--  - we want invocations of GHC (an already configured program) to be able to
+--    find this program (e.g. if the build-tool-depends executable is used
+--    in a Template Haskell splice).
+--
+-- In this case, we want to add the build tool to the PATH of GHC, even though
+-- GHC is already configured which in theory means we shouldn't touch it any
+-- more.
+updatePathProgDb :: Verbosity -> ProgramDb -> IO ProgramDb
+updatePathProgDb verbosity progdb =
+  updatePathProgs verbosity progs progdb
+  where
+    progs = Map.elems $ configuredProgs progdb
+
+-- | See 'updatePathProgDb'
+updatePathProgs :: Verbosity -> [ConfiguredProgram] -> ProgramDb -> IO ProgramDb
+updatePathProgs verbosity progs progdb =
+  foldM (flip (updatePathProg verbosity)) progdb progs
+
+-- | See 'updatePathProgDb'.
+updatePathProg :: Verbosity -> ConfiguredProgram -> ProgramDb -> IO ProgramDb
+updatePathProg _verbosity prog progdb = do
+  newPath <- programSearchPathAsPATHVar (progSearchPath progdb)
+  let envOverrides = progOverrideEnv progdb
+      progOverrides = programOverrideEnv prog
+      prog' =
+        prog
+          { programOverrideEnv =
+              [("PATH", Just newPath)]
+                ++ filter ((/= "PATH") . fst) (envOverrides ++ progOverrides)
+          }
+  return $ updateProgram prog' progdb
 
 -- | Check that a program is configured and available to be run.
 --
@@ -561,6 +613,5 @@ requireProgramVersion
   -> ProgramDb
   -> IO (ConfiguredProgram, Version, ProgramDb)
 requireProgramVersion verbosity prog range programDb =
-  join $
-    either (dieWithException verbosity) return
-      `fmap` lookupProgramVersion verbosity prog range programDb
+  either (dieWithException verbosity) return
+    =<< lookupProgramVersion verbosity prog range programDb

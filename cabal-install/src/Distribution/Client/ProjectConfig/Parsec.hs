@@ -1,12 +1,9 @@
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE TupleSections #-}
 
 -- | Parsing project configuration.
 module Distribution.Client.ProjectConfig.Parsec
   ( -- * Package configuration
-    parseProjectSkeleton
-  , parseProject
-  , ProjectConfigSkeleton
+    parseProject
   , ProjectConfig (..)
 
     -- ** Parsing
@@ -17,7 +14,7 @@ module Distribution.Client.ProjectConfig.Parsec
 import Distribution.CabalSpecVersion
 import Distribution.Client.HttpUtils
 import Distribution.Client.ProjectConfig.FieldGrammar (packageConfigFieldGrammar, projectConfigFieldGrammar)
-import Distribution.Client.ProjectConfig.Legacy (ProjectConfigSkeleton)
+import Distribution.Client.ProjectConfig.Import (ProjectConfigSkeleton, cyclicalImportMsg, fetchImport, untrimmedUriImportMsg)
 import qualified Distribution.Client.ProjectConfig.Lens as L
 import Distribution.Client.ProjectConfig.Types
 import Distribution.Client.Types.Repo hiding (repoName)
@@ -48,19 +45,18 @@ import Distribution.Types.ConfVar (ConfVar (..))
 import Distribution.Types.PackageName (PackageName)
 import Distribution.Utils.Generic (fromUTF8BS, toUTF8BS, validateUTF8)
 import Distribution.Utils.NubList (toNubList)
-import Distribution.Utils.String (trim)
 import Distribution.Verbosity
 
 import Control.Monad.State.Strict (StateT, execStateT, lift)
 import qualified Data.ByteString as BS
-import Data.Coerce (coerce)
+import Data.Functor ((<&>))
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Distribution.Client.Errors.Parser (ProjectFileSource (..))
 import qualified Distribution.Compat.CharParsing as P
-import Network.URI (parseURI, uriFragment, uriPath, uriScheme)
-import System.Directory (createDirectoryIfMissing, makeAbsolute)
-import System.FilePath (isAbsolute, isPathSeparator, makeValid, splitFileName, (</>))
+import Network.URI (URI, uriFragment, uriPath, uriScheme)
+import System.Directory (makeAbsolute)
+import System.FilePath (splitFileName)
 import qualified Text.Parsec
 import Text.PrettyPrint (render)
 import qualified Text.PrettyPrint as Disp
@@ -136,16 +132,16 @@ parseProjectSkeleton cacheDir httpTransport verbosity projectDir source (Project
                   when
                     (isUntrimmedUriConfigPath importLocPath)
                     (noticeDoc verbosity $ untrimmedUriImportMsg (Disp.text "Warning:") importLocPath)
-                  let fs = (\z -> CondNode ([normLocPath], z) mempty) <$> fieldsToConfig normSource (reverse acc)
-                  importParseResult <- parseProjectSkeleton cacheDir httpTransport verbosity projectDir importLocPath . ProjectConfigToParse =<< fetchImportConfig normLocPath
-
+                  let parser = parseProjectSkeleton cacheDir httpTransport verbosity projectDir importLocPath
+                  (mbUri, importParseResult) <- fetchImport parser cacheDir httpTransport verbosity projectDir normLocPath
                   rest <- go [] xs
+                  let fs = (\z -> CondNode ([(mbUri, normLocPath)], z) mempty) <$> fieldsToConfig normSource (reverse acc)
                   pure . fmap mconcat . sequence $ [fs, importParseResult, rest]
           )
           (parseImport pos importLines)
       (Section (Name pos "if") args xs') -> do
         subpcs <- go [] xs'
-        let fs = fmap singletonProjectConfigSkeleton $ fieldsToConfig source (reverse acc)
+        let fs = singletonProjectConfigSkeleton <$> fieldsToConfig source (reverse acc)
         (elseClauses, rest) <- parseElseClauses xs
         let condNode =
               (\c pcs e -> CondNode mempty [CondBranch c pcs e])
@@ -190,23 +186,6 @@ parseProjectSkeleton cacheDir httpTransport verbosity projectDir source (Project
       config <- parseFieldGrammarCheckingStanzas cabalSpec fs (projectConfigFieldGrammar sourceConfigPath (knownProgramNames programDb)) stanzas
       config' <- view stateConfig <$> execStateT (goSections programDb sections) (SectionS config)
       return config'
-
-    fetchImportConfig :: ProjectConfigPath -> IO BS.ByteString
-    fetchImportConfig (ProjectConfigPath (pci :| _)) = do
-      debug verbosity $ "fetching import: " ++ pci
-      fetch pci
-
-    fetch :: FilePath -> IO BS.ByteString
-    fetch pci = case parseURI (trim pci) of
-      Just uri -> do
-        let fp = cacheDir </> map (\x -> if isPathSeparator x then '_' else x) (makeValid $ show uri)
-        createDirectoryIfMissing True cacheDir
-        _ <- downloadURI httpTransport verbosity uri fp
-        BS.readFile fp
-      Nothing ->
-        BS.readFile $
-          if isAbsolute pci then pci else coerce projectDir </> pci
-
     modifiesCompiler :: ProjectConfig -> Bool
     modifiesCompiler pc = isSet projectConfigHcFlavor || isSet projectConfigHcPath || isSet projectConfigHcPkg
       where
@@ -217,7 +196,7 @@ parseProjectSkeleton cacheDir httpTransport verbosity projectDir source (Project
       | underConditional && modifiesCompiler d = parseFatalFailure zeroPos "Cannot set compiler in a conditional clause of a cabal project file"
       | otherwise = mapM_ sanityWalkBranch comps >> pure t
 
-    sanityWalkBranch :: CondBranch ConfVar ([ProjectConfigPath], ProjectConfig) -> ParseResult ProjectFileSource ()
+    sanityWalkBranch :: CondBranch ConfVar ([(Maybe URI, ProjectConfigPath)], ProjectConfig) -> ParseResult ProjectFileSource ()
     sanityWalkBranch (CondBranch _c t f) = traverse_ (sanityWalkPCS True) f >> sanityWalkPCS True t >> pure ()
 
     programDb = defaultProgramDb
@@ -229,7 +208,7 @@ startOfSection defaultPos [] = defaultPos
 startOfSection _ (cond : _) = sectionArgAnn cond
 
 knownProgramNames :: ProgramDb -> [String]
-knownProgramNames programDb = (programName . fst) <$> knownPrograms programDb
+knownProgramNames programDb = programName . fst <$> knownPrograms programDb
 
 -- | Monad in which sections are parsed
 type SectionParser src = StateT SectionS (ParseResult src)
@@ -256,12 +235,12 @@ parseSection programDb (MkSection (Name pos name) args secFields)
   | name == "program-options" = do
       verifyNullSubsections
       verifyNullSectionArgs
-      opts' <- lift $ parseProgramArgs programDb fields
+      opts' <- lift $ parseProgramArgs programDb True fields
       stateConfig . L.projectConfigLocalPackages . L.packageConfigProgramArgs %= (opts' <>)
   | name == "program-locations" = do
       verifyNullSubsections
       verifyNullSectionArgs
-      paths' <- lift $ parseProgramPaths programDb fields
+      paths' <- lift $ parseProgramPaths programDb True fields
       stateConfig . L.projectConfigLocalPackages . L.packageConfigProgramPaths %= (paths' <>)
   | name == "repository" = do
       verifyNullSubsections
@@ -294,11 +273,11 @@ parseSection programDb (MkSection (Name pos name) args secFields)
     warnInvalidSubsection pos' name' = lift $ parseWarning pos' PWTInvalidSubsection $ "Invalid subsection " ++ show name'
     programNames = knownProgramNames programDb
     verifyNullSubsections = unless (null sections) (warnInvalidSubsection pos name)
-    verifyNullSectionArgs = unless (null args) (lift $ parseFailure pos $ "The section '" <> (show name) <> "' takes no arguments")
+    verifyNullSectionArgs = unless (null args) (lift $ parseFailure pos $ "The section '" <> show name <> "' takes no arguments")
     parsePackageConfig = do
       packageCfg <- lift $ parseFieldGrammar cabalSpec fields (packageConfigFieldGrammar programNames)
-      args' <- lift $ parseProgramArgs programDb fields
-      paths <- lift $ parseProgramPaths programDb fields
+      args' <- lift $ parseProgramArgs programDb False fields
+      paths <- lift $ parseProgramPaths programDb False fields
       return packageCfg{packageConfigProgramPaths = paths, packageConfigProgramArgs = args'}
 
 stanzas :: Set BS.ByteString
@@ -364,24 +343,28 @@ parsePackageName pos args = case args of
       P.choice [P.try (P.char '*' >> return AllPackages), SpecificPackage <$> parsec]
 
 -- | Parse fields of a program-options stanza.
-parseProgramArgs :: ProgramDb -> Fields Position -> ParseResult src (MapMappend String [String])
-parseProgramArgs programDb fields = foldM parseField mempty (filter hasOptionsSuffix $ Map.toList fields)
+parseProgramArgs :: ProgramDb -> Bool -> Fields Position -> ParseResult src (MapMappend String [String])
+parseProgramArgs programDb warnUnknown fields = foldM parseField mempty (filter hasOptionsSuffix $ Map.toList fields)
   where
     parseField programArgs (fieldName, fieldLines) = do
       case readProgramName "-options" programDb fieldName of
-        Nothing -> warnUnknownFields fieldName fieldLines >> return programArgs
+        Nothing -> do
+          when warnUnknown $ warnUnknownFields fieldName fieldLines
+          return programArgs
         Just program -> do
           args <- parseProgramArgsField $ reverse fieldLines
           return $ programArgs <> MapMappend (Map.singleton program args)
     hasOptionsSuffix (fieldName, _) = BS.isSuffixOf "-options" fieldName
 
 -- | Parse fields of a program-locations stanza.
-parseProgramPaths :: ProgramDb -> Fields Position -> ParseResult src (MapLast String FilePath)
-parseProgramPaths programDb fields = foldM parseField mempty (filter hasLocationSuffix $ Map.toList fields)
+parseProgramPaths :: ProgramDb -> Bool -> Fields Position -> ParseResult src (MapLast String FilePath)
+parseProgramPaths programDb warnUnknown fields = foldM parseField mempty (filter hasLocationSuffix $ Map.toList fields)
   where
     parseField paths (fieldName, fieldLines) = do
       case readProgramName "-location" programDb fieldName of
-        Nothing -> warnUnknownFields fieldName fieldLines >> return paths
+        Nothing -> do
+          when warnUnknown $ warnUnknownFields fieldName fieldLines
+          return paths
         Just program -> do
           case fieldLines of
             (MkNamelessField pos lines') : _ -> do
@@ -392,7 +375,7 @@ parseProgramPaths programDb fields = foldM parseField mempty (filter hasLocation
 
 -- | Parse all arguments to a single program in program-options stanza.
 -- By processing '[NamelessField Position]', we support multiple occurrences of the field, concatenating the arguments.
-parseProgramArgsField :: [NamelessField Position] -> ParseResult src ([String])
+parseProgramArgsField :: [NamelessField Position] -> ParseResult src [String]
 parseProgramArgsField fieldLines =
   concat <$> mapM (\(MkNamelessField _ lines') -> parseProgramArgsFieldLines lines') fieldLines
 
@@ -407,14 +390,14 @@ type FieldSuffix = String
 -- | Extract the program name of a <progname> field, allow it to have a suffix such as '-options' and check whether the 'ProgramDB' contains it.
 readProgramName :: FieldSuffix -> ProgramDb -> FieldName -> Maybe String
 readProgramName suffix programDb fieldName =
-  parseProgramName suffix fieldName >>= ((flip lookupKnownProgram) programDb) >>= pure . programName
+  (parseProgramName suffix fieldName >>= (`lookupKnownProgram` programDb)) <&> programName
 
 parseProgramName :: FieldSuffix -> FieldName -> Maybe String
 parseProgramName suffix fieldName = case runParsecParser parser "<parseProgramName>" fieldNameStream of
   Left _ -> Nothing
   Right str -> Just str
   where
-    parser = P.manyTill P.anyChar (P.try ((P.string suffix)) <* P.eof)
+    parser = P.manyTill P.anyChar (P.try (P.string suffix) <* P.eof)
     fieldNameStream = fieldLineStreamFromBS fieldName
 
 -- | Issue a 'PWTUnknownField' warning at all occurrences of a field.

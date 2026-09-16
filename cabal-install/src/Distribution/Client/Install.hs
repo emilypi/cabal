@@ -1,10 +1,5 @@
 {-# LANGUAGE CPP #-}
 {-# LANGUAGE DataKinds #-}
-{-# LANGUAGE TupleSections #-}
-
------------------------------------------------------------------------------
-
------------------------------------------------------------------------------
 
 -- |
 -- Module      :  Distribution.Client.Install
@@ -116,7 +111,8 @@ import Distribution.Client.Setup
   , filterTestFlags
   )
 import Distribution.Client.SetupWrapper
-  ( SetupScriptOptions (..)
+  ( SetupRunnerArgs (NotInLibrary)
+  , SetupScriptOptions (..)
   , defaultSetupScriptOptions
   , setupWrapper
   )
@@ -228,6 +224,7 @@ import Distribution.Utils.Path hiding
 import Distribution.Simple.Utils
   ( VerboseException
   , createDirectoryIfMissingVerbose
+  , ordNub
   , writeFileAtomic
   )
 import Distribution.Simple.Utils as Utils
@@ -273,7 +270,9 @@ import Distribution.Version
   , foldVersionRange
   )
 
+import Data.Bifunctor (bimap)
 import qualified Data.ByteString as BS
+import Data.Foldable (fold)
 import Distribution.Client.Errors
 
 -- TODO:
@@ -336,7 +335,7 @@ install
           ++ "see https://github.com/haskell/cabal/issues/3353"
           ++ " (if you didn't type --root-cmd, comment out root-cmd"
           ++ " in your ~/.config/cabal/config file)"
-    let userOrSandbox = fromFlag (configUserInstall configFlags)
+    let userOrSandbox = fromFlagOrDefault defaultUserInstall (configUserInstall configFlags)
     unless userOrSandbox $
       warn verbosity $
         "the --global flag is deprecated -- "
@@ -710,10 +709,10 @@ pruneInstallPlan pkgSpecifiers =
         ++ "required by a dependency of one of the other targets."
       where
         pkgids =
-          nub
+          ordNub
             [ depid
             | SolverInstallPlan.PackageMissingDeps _ depids <- problems
-            , depid <- depids
+            , depid <- toList depids
             , packageName depid `elem` targetnames
             ]
 
@@ -927,7 +926,7 @@ printPlan dryRun verbosity plan sourcePkgDb = case plan of
 
     showPkg (pkg, _) =
       prettyShow (packageId pkg)
-        ++ showLatest (pkg)
+        ++ showLatest pkg
 
     showPkgAndReason (ReadyPackage pkg', pr) =
       unwords
@@ -952,7 +951,7 @@ printPlan dryRun verbosity plan sourcePkgDb = case plan of
     showLatest pkg = case mLatestVersion of
       Just latestVersion ->
         if packageVersion pkg < latestVersion
-          then ("(latest: " ++ prettyShow latestVersion ++ ")")
+          then "(latest: " ++ prettyShow latestVersion ++ ")"
           else ""
       Nothing -> ""
       where
@@ -1002,7 +1001,7 @@ printPlan dryRun verbosity plan sourcePkgDb = case plan of
                 )
             )
           _ <-
-          CD.flatDeps (confPkgDeps cpkg)
+          fold (confPkgDeps cpkg)
       ]
 
     revDeps :: Map.Map PackageId [PackageId]
@@ -1240,7 +1239,7 @@ regenerateHaddockIndex
         defaultDirs <-
           InstallDirs.defaultInstallDirs
             (compilerFlavor comp)
-            (fromFlag (configUserInstall configFlags))
+            (fromFlagOrDefault defaultUserInstall (configUserInstall configFlags))
             True
         let indexFileTemplate = fromFlag (installHaddockIndex installFlags)
             indexFile = substHaddockIndexFileName defaultDirs indexFileTemplate
@@ -1352,7 +1351,7 @@ printBuildFailures verbosity buildOutcomes =
     failed ->
       dieWithException verbosity $
         SomePackagesFailedToInstall $
-          map (\(pkgid, reason) -> (prettyShow pkgid, printFailureReason reason)) failed
+          map (bimap prettyShow printFailureReason) failed
   where
     printFailureReason reason = case reason of
       GracefulFailure msg -> msg
@@ -1429,7 +1428,7 @@ performInstallations
     )
   installedPkgIndex
   installPlan = do
-    info verbosity $ "Number of threads used: " ++ (show numJobs) ++ "."
+    info verbosity $ "Number of threads used: " ++ show numJobs ++ "."
 
     jobControl <-
       if parallelInstall
@@ -1494,7 +1493,6 @@ performInstallations
           distPref
           (chooseCabalVersion configExFlags (libVersion miscOptions))
           (Just lock)
-          parallelInstall
           index
           (Just rpkg)
 
@@ -1873,7 +1871,7 @@ installUnpackedPackage
           filterConfigureFlags
             configFlags'
               { configCommonFlags =
-                  (configCommonFlags (configFlags'))
+                  (configCommonFlags configFlags')
                     { setupVerbosity = toFlag $ verbosityFlags verbosity'
                     }
               }
@@ -1959,7 +1957,7 @@ installUnpackedPackage
                     _ -> ipkgs
               let packageDBs =
                     interpretPackageDbFlags
-                      (fromFlag (configUserInstall configFlags))
+                      (fromFlagOrDefault defaultUserInstall (configUserInstall configFlags))
                       (configPackageDBs configFlags)
               for_ ipkgs' $ \ipkg' ->
                 registerPackage
@@ -2033,7 +2031,7 @@ installUnpackedPackage
 
               traverse (readPkgConf (getSymbolicPath pkgConfDest)) . sort . filter notHidden
                 =<< listDirectory (getSymbolicPath pkgConfDest)
-            else fmap (: []) $ readPkgConf "." (getSymbolicPath pkgConfDest)
+            else (: []) <$> readPkgConf "." (getSymbolicPath pkgConfDest)
 
       readPkgConf
         :: FilePath
@@ -2066,7 +2064,7 @@ installUnpackedPackage
 
       setup cmd getCommonFlags flags mLogPath =
         Exception.bracket
-          (traverse (\path -> openFile path AppendMode) mLogPath)
+          (traverse (`openFile` AppendMode) mLogPath)
           (traverse_ hClose)
           ( \logFileHandle ->
               setupWrapper
@@ -2080,6 +2078,7 @@ installUnpackedPackage
                 getCommonFlags
                 flags
                 (const [])
+                NotInLibrary
           )
 
 -- helper
@@ -2114,7 +2113,7 @@ withWin32SelfUpgrade verbosity uid configFlags cinfo platform pkg action = do
   defaultDirs <-
     InstallDirs.defaultInstallDirs
       compFlavor
-      (fromFlag (configUserInstall configFlags))
+      (fromFlagOrDefault defaultUserInstall (configUserInstall configFlags))
       (PackageDescription.hasLibs pkg)
 
   Win32SelfUpgrade.possibleSelfUpgrade

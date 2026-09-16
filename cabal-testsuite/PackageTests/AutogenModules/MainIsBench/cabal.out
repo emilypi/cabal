@@ -6,7 +6,9 @@ In order, the following will be built:
 Configuring benchmark 'Bench' for MainIsBench-0.1...
 Preprocessing benchmark 'Bench' for MainIsBench-0.1...
 Building benchmark 'Bench' for MainIsBench-0.1...
+Error: [Cabal-7125]
+Failed to build MainIsBench-0.1-inplace-Bench. The exception was:
+  -----BEGIN CABAL OUTPUT-----
 Error: [Cabal-2115]
 MyDummy.hs doesn't exist
-Error: [Cabal-7125]
-Failed to build MainIsBench-0.1-inplace-Bench.
+CallStack (from HasCallStack): <SNIPPED>

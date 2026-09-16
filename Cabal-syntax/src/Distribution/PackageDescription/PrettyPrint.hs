@@ -35,6 +35,7 @@ import Prelude ()
 import Distribution.CabalSpecVersion
 import Distribution.Compat.Lens
 import Distribution.FieldGrammar (PrettyFieldGrammar', prettyFieldGrammar)
+import Distribution.FieldGrammar.Newtypes (MQuoted (..), RelativePathNT (..), SymbolicPathNT (..), TestedWith (..), Token (..), Token' (..))
 import Distribution.Fields.Pretty
 import Distribution.PackageDescription
 import Distribution.PackageDescription.Configuration (transformAllBuildInfos)
@@ -185,7 +186,7 @@ ppCondBenchmarks v suites =
 ppCondition :: Condition ConfVar -> Doc
 ppCondition (Var x) = ppConfVar x
 ppCondition (Lit b) = text (show b)
-ppCondition (CNot c) = char '!' <<>> (ppCondition c)
+ppCondition (CNot c) = char '!' <<>> ppCondition c
 ppCondition (COr c1 c2) =
   parens
     ( hsep

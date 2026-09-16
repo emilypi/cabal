@@ -1,28 +1,27 @@
-{-# LANGUAGE FlexibleInstances #-}
-{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE ApplicativeDo #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE RecordWildCards #-}
 
 module Distribution.Client.Utils.Parsec
   ( remoteRepoGrammar
 
     -- ** Flag
   , alaFlag
-  , Flag'
+  , Flag' (..)
 
     -- ** NubList
   , alaNubList
   , alaNubList'
-  , NubList'
+  , NubList' (..)
 
     -- ** Newtype wrappers
   , module Distribution.Client.Utils.Newtypes
   ) where
 
 import Distribution.Client.Compat.Prelude
-import Distribution.Compat.Newtype
 import Prelude ()
 
+import Data.Coerce (Coercible, coerce)
 import Distribution.Client.Types.Repo
 import Distribution.Client.Types.RepoName
 import Distribution.Client.Utils.Newtypes
@@ -41,13 +40,11 @@ newtype Flag' b a = Flag' {_getFlag :: Flag a}
 alaFlag :: (a -> b) -> Flag a -> Flag' b a
 alaFlag _ = Flag'
 
-instance Newtype (Flag a) (Flag' wrapper a)
+instance (Coercible a b, Parsec b) => Parsec (Flag' b a) where
+  parsec = coerce . toFlag . (coerce :: b -> a) <$> parsec
 
-instance (Newtype a b, Parsec b) => Parsec (Flag' b a) where
-  parsec = pack . toFlag . (unpack :: b -> a) <$> parsec
-
-instance (Newtype a b, Pretty b) => Pretty (Flag' b a) where
-  pretty = pretty . (pack :: a -> b) . fromFlag . unpack
+instance (Coercible a b, Pretty b) => Pretty (Flag' b a) where
+  pretty = pretty . (coerce :: a -> b) . fromFlag . coerce
 
 -- | Like 'List' for usage with a 'FieldGrammar', but for 'NubList'.
 newtype NubList' sep b a = NubList' {_getNubList :: NubList a}
@@ -61,9 +58,6 @@ newtype NubList' sep b a = NubList' {_getNubList :: NubList a}
 -- >>> :t alaNubList' FSep Token
 -- alaNubList' FSep Token
 --   :: NubList String -> NubList' FSep Token String
---
--- >>> unpack' (alaNubList' FSep Token) <$> eitherParsec "foo bar foo"
--- Right ["foo","bar"]
 alaNubList :: sep -> NubList a -> NubList' sep (Identity a) a
 alaNubList _ = NubList'
 
@@ -71,20 +65,20 @@ alaNubList _ = NubList'
 alaNubList' :: sep -> (a -> b) -> NubList a -> NubList' sep b a
 alaNubList' _ _ = NubList'
 
-instance Newtype (NubList a) (NubList' sep wrapper a)
+instance (Coercible a b, Ord a, Sep sep, Parsec b) => Parsec (NubList' sep b a) where
+  parsec = coerce . NubList.toNubList . map (coerce :: b -> a) <$> parseSep (Proxy :: Proxy sep) parsec
 
-instance (Newtype a b, Ord a, Sep sep, Parsec b) => Parsec (NubList' sep b a) where
-  parsec = pack . NubList.toNubList . map (unpack :: b -> a) <$> parseSep (Proxy :: Proxy sep) parsec
-
-instance (Newtype a b, Sep sep, Pretty b) => Pretty (NubList' sep b a) where
-  pretty = prettySep (Proxy :: Proxy sep) . map (pretty . (pack :: a -> b)) . NubList.fromNubList . unpack
+instance (Coercible a b, Sep sep, Pretty b) => Pretty (NubList' sep b a) where
+  pretty = prettySep (Proxy :: Proxy sep) . map (pretty . (coerce :: a -> b)) . NubList.fromNubList . coerce
 
 remoteRepoGrammar :: RepoName -> ParsecFieldGrammar RemoteRepo RemoteRepo
-remoteRepoGrammar name =
-  RemoteRepo
-    <$> pure name
-    <*> uniqueFieldAla "url" URI_NT remoteRepoURILens
-    <*> optionalField "secure" remoteRepoSecureLens
-    <*> monoidalFieldAla "root-keys" (alaList' FSep Token) remoteRepoRootKeysLens
-    <*> optionalFieldDefAla "key-threshold" KeyThreshold remoteRepoKeyThresholdLens 0
-    <*> pure False -- we don't parse remoteRepoShouldTryHttps
+remoteRepoGrammar remoteRepoName = do
+  remoteRepoURI <- uniqueFieldAla "url" URI_NT remoteRepoURILens
+  remoteRepoSecure <- optionalField "secure" remoteRepoSecureLens
+  remoteRepoRootKeys <- monoidalFieldAla "root-keys" (alaList' FSep Token) remoteRepoRootKeysLens
+  remoteRepoKeyThreshold <- optionalFieldDefAla "key-threshold" KeyThreshold remoteRepoKeyThresholdLens 0
+  pure
+    RemoteRepo
+      { remoteRepoShouldTryHttps = False -- we don't parse remoteRepoShouldTryHttps
+      , ..
+      }

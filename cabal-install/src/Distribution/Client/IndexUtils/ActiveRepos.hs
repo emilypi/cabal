@@ -1,7 +1,4 @@
-{-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE TupleSections #-}
 
 module Distribution.Client.IndexUtils.ActiveRepos
   ( ActiveRepos (..)
@@ -108,10 +105,7 @@ instance Parsec ActiveRepoEntry where
           "repo" -> P.char ':' *> leadRepo
           _ -> P.unexpected $ "Unknown active repository entry type: " ++ token
 
-      leadRepo = do
-        r <- parsec
-        s <- strategyP
-        return (ActiveRepo r s)
+      leadRepo = ActiveRepo <$> parsec <*> strategyP
 
       strategyP = P.option CombineStrategyMerge (P.char ':' *> parsec)
 

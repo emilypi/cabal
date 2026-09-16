@@ -1,18 +1,14 @@
 {-# LANGUAGE DataKinds #-}
-{-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE DerivingStrategies #-}
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE GADTs #-}
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE StandaloneDeriving #-}
-{-# LANGUAGE TypeApplications #-}
 
 -- |
 -- Module: Distribution.Simple.SetupHooks.Internal
 --
--- Internal implementation module.
+-- Internal implementation module for 'SetupHooks'.
+--
 -- Users of @build-type: Hooks@ should import "Distribution.Simple.SetupHooks"
 -- instead.
 module Distribution.Simple.SetupHooks.Internal
@@ -77,6 +73,7 @@ module Distribution.Simple.SetupHooks.Internal
 
     -- ** Executing build rules
   , executeRules
+  , executeRulesUserOrSystem
 
     -- ** HookedBuildInfo compatibility code
   , hookedBuildInfoComponents
@@ -88,7 +85,9 @@ import Distribution.Compat.Prelude
 import Prelude ()
 
 import Distribution.Compat.Lens ((.~))
+import Distribution.ModuleName (ModuleName)
 import Distribution.PackageDescription
+import Distribution.Pretty (prettyShow)
 import Distribution.Simple.BuildPaths
 import Distribution.Simple.Compiler (Compiler (..))
 import Distribution.Simple.Errors
@@ -109,20 +108,29 @@ import qualified Distribution.Simple.SetupHooks.Rule as Rule
 import Distribution.Simple.Utils
 import Distribution.System (Platform (..))
 import Distribution.Utils.Path
+import Distribution.Utils.Structured
+  ( structuredDecodeOrFailIO
+  , structuredEncodeFile
+  )
 
 import qualified Distribution.Types.BuildInfo.Lens as BI (buildInfo)
 import Distribution.Types.LocalBuildConfig as LBC
 import Distribution.Types.TargetInfo
 import Distribution.Verbosity
 
+import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
 import Data.Coerce (coerce)
+import Data.Either (fromRight)
 import qualified Data.Graph as Graph
+import Data.IORef (IORef, modifyIORef', newIORef, readIORef)
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Map as Map
+import Data.Monoid (Ap (..))
 import qualified Data.Set as Set
 
-import System.Directory (doesFileExist)
+import System.Directory (doesFileExist, getModificationTime)
+import qualified System.FilePath as FilePath
 
 --------------------------------------------------------------------------------
 -- SetupHooks
@@ -789,8 +797,8 @@ applyComponentDiffs verbosity f = traverseComponents apply_diff
         Just diff -> applyComponentDiff verbosity c diff
         Nothing -> return c
 
-forComponents_ :: PackageDescription -> (Component -> IO ()) -> IO ()
-forComponents_ pd f = getConst $ traverseComponents (Const . f) pd
+forComponents_ :: Applicative m => PackageDescription -> (Component -> m ()) -> m ()
+forComponents_ pd f = getAp . getConst $ traverseComponents (Const . Ap . f) pd
 
 applyComponentDiff
   :: Verbosity
@@ -849,7 +857,11 @@ executeRules =
 -- an external hooks executable.
 executeRulesUserOrSystem
   :: forall userOrSystem
-   . SScope userOrSystem
+   . ( Binary (RuleData userOrSystem)
+     , Structured (RuleData userOrSystem)
+     , Eq (RuleData userOrSystem)
+     )
+  => SScope userOrSystem
   -> (RuleId -> RuleDynDepsCmd userOrSystem -> IO (Maybe ([Rule.Dependency], LBS.ByteString)))
   -> (RuleId -> RuleExecCmd userOrSystem -> IO ())
   -> Verbosity
@@ -858,6 +870,12 @@ executeRulesUserOrSystem
   -> Map RuleId (RuleData userOrSystem)
   -> IO ()
 executeRulesUserOrSystem scope runDepsCmdData runCmdData verbosity lbi tgtInfo allRules = do
+  -- Load the rule cache from the previous build.
+  -- Used to detect when rule definitions have changed.
+  oldRules <- handleDoesNotExist Map.empty $ do
+    -- NB: do a strict read to avoid retaining the file handle.
+    bs <- BS.readFile rulesCacheFile
+    fromRight Map.empty <$> structuredDecodeOrFailIO (LBS.fromStrict bs)
   -- Compute all extra dynamic dependency edges.
   dynDepsEdges <-
     flip Map.traverseMaybeWithKey allRules $
@@ -869,7 +887,7 @@ executeRulesUserOrSystem scope runDepsCmdData runCmdData verbosity lbi tgtInfo a
   let
     (ruleGraph, ruleFromVertex, vertexFromRuleId) =
       Graph.graphFromEdges
-        [ (rule, rId, nub $ mapMaybe directRuleDependencyMaybe allDeps)
+        [ (rule, rId, ordNub $ mapMaybe directRuleDependencyMaybe allDeps)
         | (rId, rule) <- Map.toList allRules
         , let dynDeps = maybe [] fst (Map.lookup rId dynDepsEdges)
               allDeps = staticDependencies rule ++ dynDeps
@@ -890,20 +908,87 @@ executeRulesUserOrSystem scope runDepsCmdData runCmdData verbosity lbi tgtInfo a
             , map (fmap ruleFromVertex) (v : vs)
             )
 
-    -- Compute demanded rules.
+    -- Compute demanded rules: anything reachable from the roots, which are:
     --
-    -- SetupHooks TODO: maybe requiring all generated modules to appear
-    -- in autogen-modules is excessive; we can look through all modules instead.
+    --  - autogen modules
+    --  - extra-c-sources, extra-asm-sources, ... that happen to be in the
+    --    autogen directory (this is the workaround for there being no
+    --    'autogen' field for those)
+    --  - extra-bundled-libs
+    --
+    -- This does not include autogen-includes, because .h files are required
+    -- during configure time, so not relevant for pre-build rules which are run
+    -- after configure.
+    autogenModPaths :: [RelativePath Source File]
     autogenModPaths =
       map (\m -> moduleNameSymbolicPath m <.> "hs") $
-        autogenModules $
-          componentBuildInfo $
-            targetComponent tgtInfo
-    leafRule_maybe (rId, r) =
-      if any ((r `ruleOutputsLocation`) . (Location compAutogenDir)) autogenModPaths
-        then vertexFromRuleId rId
-        else Nothing
-    leafRules = mapMaybe leafRule_maybe $ Map.toList allRules
+        autogenModules compBuildInfo
+    autogenExtraSourcesPaths :: [RelativePath Source File]
+    autogenExtraSourcesPaths =
+      concatMap
+        (mapMaybe relativeToAutogen)
+        [ cSources compBuildInfo
+        , cxxSources compBuildInfo
+        , cmmSources compBuildInfo
+        , asmSources compBuildInfo
+        , jsSources compBuildInfo
+        ]
+    extraBundledLibsPaths :: [RelativePath Source File]
+    extraBundledLibsPaths =
+      map makeRelativePathEx $
+        extraBundledLibs compBuildInfo
+
+    -- Is this rule directly demanded (e.g. it generates a Haskell module
+    -- declared in the autogen-modules field)? If so, return the appropriate
+    -- demand graph vertex (conceptually a leaf vertex).
+    isLeafRule
+      :: (RuleId, RuleData scope)
+      -> Either (NotDemandedRuleReasons scope) Graph.Vertex
+    isLeafRule (rId, r@Rule{results = ruleOutputLocs})
+      | let
+          normOuts = fmap normaliseLocation ruleOutputLocs
+          anyOut f =
+            any
+              ( \demandedPath ->
+                  let normDemanded = normaliseLocation $ Location compAutogenDir demandedPath
+                   in any (f normDemanded) normOuts
+              )
+      , -- Autogen modules
+        anyOut (==) autogenModPaths
+          -- Extra source files
+          || anyOut (==) autogenExtraSourcesPaths
+          -- Extra bundled libraries
+          -- They may have any extension (.dll, .so.1.2.3, etc)
+          -- so simply allow all extensions.
+          || anyOut (\dmdLoc outLoc -> dmdLoc == dropExtensionLocation outLoc) extraBundledLibsPaths =
+          case vertexFromRuleId rId of
+            Just v -> Right v
+            Nothing ->
+              error $
+                unlines
+                  [ "internal error: no graph vertex for rule " ++ show rId
+                  , "Rule: " ++ show rId
+                  ]
+      | otherwise =
+          Left $
+            NDRR
+              { nonDemandedRules = Map.singleton rId r
+              , nonAutogenHaskellModules =
+                  Map.singleton
+                    rId
+                    [ fromString $ intercalate "." $ FilePath.splitDirectories hsPath
+                    | Location _ outPath <- NE.toList (results r)
+                    , (hsPath, ".hs") <- [FilePath.splitExtension (getSymbolicPath outPath)]
+                    ]
+              , filesNotInAutogenFolders =
+                  Map.singleton
+                    rId
+                    [ unsafeCoerceSymbolicPath fp
+                    | Location base fp <- NE.toList (results r)
+                    , Nothing <- [relativeToAutogen base]
+                    ]
+              }
+    (nonDmdReasons, leafRules) = partitionEithers $ map isLeafRule $ Map.toList allRules
     demandedRuleVerts = Set.fromList $ concatMap (Graph.reachable ruleGraph) leafRules
     nonDemandedRuleVerts = Set.fromList (Graph.vertices ruleGraph) Set.\\ demandedRuleVerts
 
@@ -922,54 +1007,41 @@ executeRulesUserOrSystem scope runDepsCmdData runCmdData verbosity lbi tgtInfo a
       -- Emit a warning if there are non-demanded rules.
       unless (null nonDemandedRuleVerts) $
         warn verbosity $
-          unlines $
-            "The following rules are not demanded and will not be run:"
-              : concat
-                [ [ "  - " ++ show rId ++ ","
-                  , "    generating " ++ show (NE.toList $ results r)
-                  ]
-                | v <- Set.toList nonDemandedRuleVerts
-                , let (r, rId, _) = ruleFromVertex v
-                ]
-              ++ [ "Possible reasons for this error:"
-                 , "  - Some autogenerated modules were not declared"
-                 , "    (in the package description or in the pre-configure hooks)"
-                 , "  - The output location for an autogenerated module is incorrect,"
-                 , "    (e.g. the file extension is incorrect, or"
-                 , "     it is not in the appropriate 'autogenComponentModules' directory)"
-                 ]
+          pprNotDemandedRuleReasons comp compAutogenDir (mconcat nonDmdReasons)
 
-      -- Run all the demanded rules, in dependency order.
+      -- Run all the demanded rules, in dependency order, propagating staleness.
+      staleRulesRef <- newIORef Set.empty
       for_ sccs $ \(Graph.Node ruleVertex _) ->
         -- Don't run a rule unless it is demanded.
         unless (ruleVertex `Set.member` nonDemandedRuleVerts) $ do
-          let ( r@Rule
-                  { ruleCommands = cmds
-                  , staticDependencies = staticDeps
-                  , results = reslts
-                  }
-                , rId
-                , _staticRuleDepIds
-                ) =
-                  ruleFromVertex ruleVertex
-              mbDyn = Map.lookup rId dynDepsEdges
-              allDeps = staticDeps ++ maybe [] fst mbDyn
+          let (r, rId, _staticRuleDepIds) = ruleFromVertex ruleVertex
+              Rule{ruleCommands, staticDependencies, results} = r
+              mbDynDeps = Map.lookup rId dynDepsEdges
+              allDeps = staticDependencies ++ maybe [] fst mbDynDeps
           -- Check that the dependencies the rule expects are indeed present.
           resolvedDeps <- traverse (resolveDependency verbosity rId allRules) allDeps
           missingRuleDeps <- filterM (missingDep mbWorkDir) resolvedDeps
           case NE.nonEmpty missingRuleDeps of
             Just missingDeps ->
               errorOut $ CantFindSourceForRuleDependencies (toRuleBinary r) missingDeps
-            -- Dependencies OK: run the associated action.
+            -- Dependencies OK: check whether the rule is up to date before
+            -- deciding to run it.
             Nothing -> do
-              let execCmd = ruleExecCmd scope cmds (snd <$> mbDyn)
-              runCmdData rId execCmd
-              -- Throw an error if running the action did not result in
-              -- the generation of outputs that we expected it to.
-              missingRuleResults <- filterM (missingDep mbWorkDir) $ NE.toList reslts
-              for_ (NE.nonEmpty missingRuleResults) $ \missingResults ->
-                errorOut $ MissingRuleOutputs (toRuleBinary r) missingResults
-              return ()
+              let dynDeps = maybe [] fst mbDynDeps
+              ruleUpToDate mbWorkDir oldRules staleRulesRef rId r dynDeps >>= \case
+                True ->
+                  info verbosity $
+                    "Rule " ++ show rId ++ " is up to date; skipping."
+                False -> do
+                  modifyIORef' staleRulesRef (Set.insert rId)
+                  runCmdData rId $ ruleExecCmd scope ruleCommands (snd <$> mbDynDeps)
+                  -- Throw an error if running the action did not result in
+                  -- the generation of outputs that we expected it to.
+                  missingRuleResults <- filterM (missingDep mbWorkDir) $ NE.toList results
+                  for_ (NE.nonEmpty missingRuleResults) $ \missingResults ->
+                    errorOut $ MissingRuleOutputs (toRuleBinary r) missingResults
+      -- Save the current rules to the cache for use in the next build.
+      structuredEncodeFile rulesCacheFile allRules
   where
     toRuleBinary :: RuleData userOrSystem -> RuleBinary
     toRuleBinary = case scope of
@@ -977,15 +1049,139 @@ executeRulesUserOrSystem scope runDepsCmdData runCmdData verbosity lbi tgtInfo a
       SSystem -> id
     clbi = targetCLBI tgtInfo
     mbWorkDir = mbWorkDirLBI lbi
+    comp = targetComponent tgtInfo
     compAutogenDir = autogenComponentModulesDir lbi clbi
+    rulesCacheFile = interpretSymbolicPath mbWorkDir (preBuildRulesCacheFile lbi clbi)
+    compBuildInfo = componentBuildInfo comp
     errorOut e =
       dieWithException verbosity $
         SetupHooksException $
           RulesException e
 
+    relativeToAutogen :: SymbolicPath Pkg to -> Maybe (RelativePath Source to)
+    relativeToAutogen = relativePathMaybe compAutogenDir
+
+-- | Collects why certain rules were not demanded (and thus not run), in order
+-- to construct an error message to report to the user.
+data NotDemandedRuleReasons scope = NDRR
+  { nonDemandedRules :: Map RuleId (RuleData scope)
+  -- ^ The rules that were not demanded
+  , nonAutogenHaskellModules :: Map RuleId [ModuleName]
+  -- ^ Rules that generate Haskell files that are not declared as
+  -- autogenerated modules.
+  , filesNotInAutogenFolders :: Map RuleId [RelativePath Pkg File]
+  -- ^ Rules that generate files that aren't in the appropriate autogen
+  -- directory.
+  }
+
+instance Semigroup (NotDemandedRuleReasons scope) where
+  NDRR r1 m1 f1 <> NDRR r2 m2 f2 = NDRR (r1 <> r2) (m1 <> m2) (f1 <> f2)
+instance Monoid (NotDemandedRuleReasons scope) where
+  mempty = NDRR mempty mempty mempty
+
+pprNotDemandedRuleReasons
+  :: Component
+  -> SymbolicPath Pkg (Dir Source)
+  -> NotDemandedRuleReasons scope
+  -> String
+pprNotDemandedRuleReasons
+  comp
+  compAutogenDir
+  (NDRR non_dmd_verts mods_map miss_files_map) =
+    unlines $ header ++ mods_lines ++ files_lines
+    where
+      mods = tagByRuleId mods_map
+      miss_files = tagByRuleId miss_files_map
+
+      tagByRuleId xs = concatMap (\(rId, x) -> map (rId,) x) $ Map.toList xs
+      ppr (rId, x) = "  - " ++ prettyShow x ++ " (for rule " ++ show (ruleName rId) ++ ")"
+
+      header :: [String]
+      header =
+        "The following rules are not demanded and will not be run:"
+          : concat
+            [ [ "  - " ++ show rId ++ ","
+              , "    generating " ++ show (NE.toList $ results r)
+              ]
+            | (rId, r) <- Map.toList non_dmd_verts
+            ]
+
+      mods_lines, files_lines :: [String]
+      mods_lines
+        | null mods =
+            []
+        | otherwise =
+            ("Perhaps add the following to the 'autogen-modules' field of the " ++ showComponentName (componentName comp) ++ " component.")
+              : map ppr mods
+      files_lines
+        | null miss_files =
+            []
+        | otherwise =
+            ("The following autogenerated file" ++ s ++ " for the " ++ showComponentName (componentName comp) ++ " component " ++ isOrAre ++ " misplaced.")
+              : (itOrThey ++ " should go in " ++ show compAutogenDir ++ "'.")
+              : map ppr miss_files
+        where
+          (s, isOrAre, itOrThey) =
+            case miss_files of
+              [_] -> ("", "is", "It")
+              _ -> ("s", "are", "They")
+
 directRuleDependencyMaybe :: Rule.Dependency -> Maybe RuleId
 directRuleDependencyMaybe (RuleDependency dep) = Just $ outputOfRule dep
 directRuleDependencyMaybe (FileDependency{}) = Nothing
+
+-- | Is the rule up to date (so that we can skip re-running it)?
+--
+-- As per the SetupHooks documentation, a rule must be re-run if:
+--
+--  - [N] the rule is new, or
+--  - [S] the rule matches with an old rule, and either:
+--    - [S1] an input to the rule has changed (either a file or rule dependency)
+--    - [S2] the rule itself has changed
+ruleUpToDate
+  :: Eq (RuleData userOrSystem)
+  => Maybe (SymbolicPath CWD (Dir Pkg))
+  -- ^ working directory
+  -> Map RuleId (RuleData userOrSystem)
+  -- ^ old rules from the previous build
+  -> IORef (Set RuleId)
+  -- ^ rules that have been re-run
+  -> RuleId
+  -> RuleData userOrSystem
+  -> [Rule.Dependency]
+  -- ^ dynamic dependencies of this rule
+  -> IO Bool
+ruleUpToDate mbWorkDir oldRules staleRulesRef rId rule dynDeps = do
+  staleRules <- readIORef staleRulesRef
+  if ruleChanged || any (`Set.member` staleRules) ruleDeps
+    then return False
+    else do
+      let maybeModTime fp = handleDoesNotExist Nothing $ Just <$> getModificationTime fp
+      outMtimes <- traverse maybeModTime outputPaths
+      case sequenceA outMtimes of
+        -- At least one output is missing: must run the rule.
+        Nothing -> return False
+        Just outs ->
+          -- Re-run if an input is more recent than the oldest output.
+          case inputPaths of
+            [] -> return True
+            _ -> do
+              inMtimes <- traverse getModificationTime inputPaths
+              return (minimum outs >= maximum inMtimes)
+  where
+    i (Location dir file) = interpretSymbolicPath mbWorkDir (dir </> file)
+    allDeps = staticDependencies rule ++ dynDeps
+    ruleDeps = [outputOfRule ro | RuleDependency ro <- allDeps]
+    fileDeps = [loc | FileDependency loc <- allDeps]
+    inputPaths = map i fileDeps
+    outputPaths = fmap i (results rule)
+    ruleChanged =
+      case Map.lookup rId oldRules of
+        Just oldRule ->
+          -- Use the Eq instance to determine if the rule has changed
+          -- (as documented in the API).
+          oldRule /= rule
+        Nothing -> True
 
 resolveDependency :: Verbosity -> RuleId -> Map RuleId (RuleData scope) -> Rule.Dependency -> IO Location
 resolveDependency verbosity rId allRules = \case
@@ -1012,14 +1208,13 @@ resolveDependency verbosity rId allRules = \case
                     RulesException $
                       InvalidRuleOutputIndex rId depId os i
 
--- | Does the rule output the given location?
-ruleOutputsLocation :: RuleData scope -> Location -> Bool
-ruleOutputsLocation (Rule{results = rs}) fp =
-  any (\out -> normaliseLocation out == normaliseLocation fp) rs
-
 normaliseLocation :: Location -> Location
 normaliseLocation (Location base rel) =
   Location (normaliseSymbolicPath base) (normaliseSymbolicPath rel)
+
+dropExtensionLocation :: Location -> Location
+dropExtensionLocation (Location base rel) =
+  Location base (makeRelativePathEx $ FilePath.dropExtensions $ getSymbolicPath rel)
 
 -- | Is the file we depend on missing?
 missingDep :: Maybe (SymbolicPath CWD (Dir Pkg)) -> Location -> IO Bool

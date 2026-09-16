@@ -1,41 +1,38 @@
-{-# LANGUAGE ConstraintKinds #-}
-{-# LANGUAGE DataKinds #-}
-{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE DerivingVia #-}
 {-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE RecordWildCards #-}
-{-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE TupleSections #-}
 {-# LANGUAGE ViewPatterns #-}
 
 -- | Project configuration, implementation in terms of legacy types.
 module Distribution.Client.ProjectConfig.Legacy
-  ( -- Project config skeletons
+  ( -- * Skeletons
     ProjectConfigSkeleton
-  , parseProject
   , instantiateProjectConfigSkeletonFetchingCompiler
   , instantiateProjectConfigSkeletonWithCompiler
   , singletonProjectConfigSkeleton
-  , projectSkeletonImports
 
-    -- * Project config in terms of legacy types
-  , LegacyProjectConfig
+    -- * Parsing
+  , parseProject
   , parseLegacyProjectConfig
+
+    -- * Legacy Configuration
+  , LegacyProjectConfig
   , showLegacyProjectConfig
 
-    -- * Conversion to and from legacy config types
+    -- * Conversions
   , commandLineFlagsToProjectConfig
   , convertLegacyProjectConfig
   , convertLegacyGlobalConfig
   , convertToLegacyProjectConfig
 
-    -- * Internals, just for tests
+    -- * Internals
+
+    -- | These functions are exposed just for tests.
   , parsePackageLocationTokenQ
   , renderPackageLocationToken
   ) where
 
-import Data.Coerce (coerce)
 import Distribution.Client.Compat.Prelude
 
 import Distribution.Types.Flag (FlagName, parsecFlagAssignment)
@@ -58,12 +55,13 @@ import Distribution.Client.CmdInstall.ClientInstallFlags
   , defaultClientInstallFlags
   )
 
-import Distribution.Compat.Lens (toListOf, view)
+import Distribution.Compat.Lens (toListOf)
 
 import Distribution.Solver.Types.ConstraintSource
 import Distribution.Solver.Types.ProjectConfigPath
 
 import Distribution.Client.NixStyleOptions (NixStyleFlags (..))
+import Distribution.Client.ProjectConfig.Import (ProjectConfigSkeleton, cyclicalImportMsg, fetchImport, untrimmedUriImportMsg)
 import Distribution.Client.ProjectFlags (ProjectFlags (..), defaultProjectFlags, projectFlagsOptions)
 import Distribution.Client.Setup
   ( ConfigExFlags (..)
@@ -141,7 +139,6 @@ import Distribution.Types.CondTree
   , ignoreConditions
   , mapTreeConds
   , mapTreeData
-  , traverseCondTreeA
   , traverseCondTreeV
   )
 import Distribution.Types.SourceRepo (RepoType)
@@ -150,14 +147,12 @@ import Distribution.Utils.NubList
   , overNubList
   , toNubList
   )
-import Distribution.Utils.String (trim)
 
 import Distribution.Client.HttpUtils
 import Distribution.Client.ParseUtils
 import Distribution.Client.ReplFlags (multiReplOption)
 import Distribution.Deprecated.ParseUtils
   ( PError (..)
-  , PWarning (..)
   , ParseResult (..)
   , commaNewLineListFieldParsec
   , newLineListField
@@ -201,9 +196,9 @@ import qualified Data.ByteString.Char8 as BS
 import Data.Functor ((<&>))
 import qualified Data.Map as Map
 import qualified Data.Set as Set
-import Network.URI (URI (..), nullURIAuth, parseURI)
-import System.Directory (createDirectoryIfMissing, makeAbsolute)
-import System.FilePath (isAbsolute, isPathSeparator, makeValid, splitFileName, (</>))
+import Network.URI (URI (..), nullURIAuth)
+import System.Directory (makeAbsolute)
+import System.FilePath (splitFileName)
 import Text.PrettyPrint
   ( Doc
   , render
@@ -214,10 +209,6 @@ import qualified Text.PrettyPrint as Disp
 ------------------------------------------------------------------
 -- Handle extended project config files with conditionals and imports.
 --
-
--- | ProjectConfigSkeleton is a tree of conditional blocks and imports wrapping a config. It can be finalized by providing the conditional resolution info
--- and then resolving and downloading the imports
-type ProjectConfigSkeleton = CondTree ConfVar ([ProjectConfigPath], ProjectConfig)
 
 singletonProjectConfigSkeleton :: ProjectConfig -> ProjectConfigSkeleton
 singletonProjectConfigSkeleton x = CondNode (mempty, x) mempty
@@ -233,17 +224,14 @@ instantiateProjectConfigSkeletonFetchingCompiler fetch flags skel
 instantiateProjectConfigSkeletonWithCompiler :: OS -> Arch -> CompilerInfo -> FlagAssignment -> ProjectConfigSkeleton -> ProjectConfig
 instantiateProjectConfigSkeletonWithCompiler os arch impl _flags skel = go $ mapTreeConds (fst . simplifyWithSysParams os arch impl) skel
   where
-    go :: CondTree FlagName ([ProjectConfigPath], ProjectConfig) -> ProjectConfig
+    go :: CondTree FlagName ([(Maybe URI, ProjectConfigPath)], ProjectConfig) -> ProjectConfig
     go (CondNode (_, l) ts) =
       let branches = concatMap processBranch ts
        in l <> mconcat branches
     processBranch (CondBranch cnd t mf) = case cnd of
       (Lit True) -> [go t]
-      (Lit False) -> maybe ([]) ((: []) . go) mf
+      (Lit False) -> maybe [] ((: []) . go) mf
       _ -> error $ "unable to process condition: " ++ show cnd -- TODO it would be nice if there were a pretty printer
-
-projectSkeletonImports :: ProjectConfigSkeleton -> [ProjectConfigPath]
-projectSkeletonImports = fst . view traverseCondTreeA
 
 -- | Parses a project from its root config file, typically cabal.project.
 parseProject
@@ -261,8 +249,10 @@ parseProject rootPath cacheDir httpTransport verbosity configToParse =
     projectDir <- makeAbsolute dir
     projectPath <- canonicalizeConfigPath projectDir (ProjectConfigPath $ projectFileName :| [])
     parseProjectSkeleton cacheDir httpTransport verbosity projectDir projectPath configToParse
-    -- NOTE: Reverse the warnings so they are in line number order.
-    <&> \case ProjectParseOk ws x -> ProjectParseOk (reverse ws) x; x -> x
+    <&> \case
+      -- NOTE: Reverse the warnings so they are in line number order.
+      ProjectParseOk ws skeleton -> ProjectParseOk (reverse ws) skeleton
+      x@ProjectParseFailed{} -> x
 
 parseProjectSkeleton
   :: FilePath
@@ -294,9 +284,10 @@ parseProjectSkeleton cacheDir httpTransport verbosity projectDir source (Project
             when
               (isUntrimmedUriConfigPath importLocPath)
               (noticeDoc verbosity $ untrimmedUriImportMsg (Disp.text "Warning:") importLocPath)
-            let fs = (\z -> CondNode ([normLocPath], z) mempty) <$> fieldsToConfig normSource (reverse acc)
-            res <- parseProjectSkeleton cacheDir httpTransport verbosity projectDir importLocPath . ProjectConfigToParse =<< fetchImportConfig normLocPath
+            let parser = parseProjectSkeleton cacheDir httpTransport verbosity projectDir importLocPath
+            (mbUri, res) <- fetchImport parser cacheDir httpTransport verbosity projectDir normLocPath
             rest <- go [] xs
+            let fs = (\z -> CondNode ([(mbUri, normLocPath)], z) mempty) <$> fieldsToConfig normSource (reverse acc)
             pure . fmap mconcat . sequence $ [projectParse Nothing normSource fs, res, rest]
       (ParseUtils.Section l "if" p xs') -> do
         normSource <- canonicalizeConfigPath projectDir source
@@ -361,36 +352,19 @@ parseProjectSkeleton cacheDir httpTransport verbosity projectDir source (Project
         addWarnings (ProjectParseOk ws' x') = ProjectParseOk (ws' ++ ((p,) <$> ws)) x'
         addWarnings x' = x'
     liftPR p _ (ParseFailed e) = pure $ projectParseFail Nothing (Just p) e
-
-    fetchImportConfig :: ProjectConfigPath -> IO BS.ByteString
-    fetchImportConfig (ProjectConfigPath (pci :| _)) = do
-      debug verbosity $ "fetching import: " ++ pci
-      fetch pci
-
-    fetch :: FilePath -> IO BS.ByteString
-    fetch pci = case parseURI $ trim pci of
-      Just uri -> do
-        let fp = cacheDir </> map (\x -> if isPathSeparator x then '_' else x) (makeValid $ show uri)
-        createDirectoryIfMissing True cacheDir
-        _ <- downloadURI httpTransport verbosity uri fp
-        BS.readFile fp
-      Nothing ->
-        BS.readFile $
-          if isAbsolute pci then pci else coerce projectDir </> pci
-
     modifiesCompiler :: ProjectConfig -> Bool
     modifiesCompiler pc = isSet projectConfigHcFlavor || isSet projectConfigHcPath || isSet projectConfigHcPkg
       where
         isSet f = f (projectConfigShared pc) /= NoFlag
 
     sanityWalkPCS :: Bool -> ProjectConfigSkeleton -> ProjectParseResult ProjectConfigSkeleton
-    sanityWalkPCS underConditional t@(CondNode (listToMaybe -> c, d) comps)
+    sanityWalkPCS underConditional t@(CondNode (fmap snd . listToMaybe -> c, d) comps)
       | underConditional && modifiesCompiler d =
           projectParseFail Nothing c $ ParseUtils.FromString "Cannot set compiler in a conditional clause of a cabal project file" Nothing
       | otherwise =
           mapM_ sanityWalkBranch comps >> pure t
 
-    sanityWalkBranch :: CondBranch ConfVar ([ProjectConfigPath], ProjectConfig) -> ProjectParseResult ()
+    sanityWalkBranch :: CondBranch ConfVar ([(Maybe URI, ProjectConfigPath)], ProjectConfig) -> ProjectParseResult ()
     sanityWalkBranch (CondBranch _c t f) = traverse_ (sanityWalkPCS True) f >> sanityWalkPCS True t >> pure ()
 
 ------------------------------------------------------------------
@@ -416,13 +390,7 @@ data LegacyProjectConfig = LegacyProjectConfig
   , legacySpecificConfig :: MapMappend PackageName LegacyPackageConfig
   }
   deriving (Show, Generic)
-
-instance Monoid LegacyProjectConfig where
-  mempty = gmempty
-  mappend = (<>)
-
-instance Semigroup LegacyProjectConfig where
-  (<>) = gmappend
+  deriving (Semigroup, Monoid) via Generically LegacyProjectConfig
 
 data LegacyPackageConfig = LegacyPackageConfig
   { legacyConfigureFlags :: ConfigFlags
@@ -432,13 +400,7 @@ data LegacyPackageConfig = LegacyPackageConfig
   , legacyBenchmarkFlags :: BenchmarkFlags
   }
   deriving (Show, Generic)
-
-instance Monoid LegacyPackageConfig where
-  mempty = gmempty
-  mappend = (<>)
-
-instance Semigroup LegacyPackageConfig where
-  (<>) = gmappend
+  deriving (Semigroup, Monoid) via Generically LegacyPackageConfig
 
 data LegacySharedConfig = LegacySharedConfig
   { legacyGlobalFlags :: GlobalFlags
@@ -450,13 +412,7 @@ data LegacySharedConfig = LegacySharedConfig
   , legacyMultiRepl :: Flag Bool
   }
   deriving (Show, Generic)
-
-instance Monoid LegacySharedConfig where
-  mempty = gmempty
-  mappend = (<>)
-
-instance Semigroup LegacySharedConfig where
-  (<>) = gmappend
+  deriving (Semigroup, Monoid) via Generically LegacySharedConfig
 
 ------------------------------------------------------------------
 -- Converting from and to the legacy types
@@ -756,7 +712,7 @@ convertLegacyAllPackageFlags globalFlags configFlags configExFlags installFlags 
       , installMinimizeConflictSet = projectConfigMinimizeConflictSet
       , installPerComponent = projectConfigPerComponent
       , installIndependentGoals = projectConfigIndependentGoals
-      , installPreferOldest = projectConfigPreferOldest
+      , installPreferVersion = projectConfigPreferVersion
       , -- installShadowPkgs         = projectConfigShadowPkgs,
       installStrongFlags = projectConfigStrongFlags
       , installAllowBootLibInstalls = projectConfigAllowBootLibInstalls
@@ -822,10 +778,10 @@ convertLegacyPerPackageFlags
         , configRelocatable = packageConfigRelocatable
         , configCoverageFor = _
         } = configFlags
-      packageConfigExtraLibDirs = fmap getSymbolicPath $ configExtraLibDirs configFlags
-      packageConfigExtraLibDirsStatic = fmap getSymbolicPath $ configExtraLibDirsStatic configFlags
-      packageConfigExtraFrameworkDirs = fmap getSymbolicPath $ configExtraFrameworkDirs configFlags
-      packageConfigExtraIncludeDirs = fmap getSymbolicPath $ configExtraIncludeDirs configFlags
+      packageConfigExtraLibDirs = getSymbolicPath <$> configExtraLibDirs configFlags
+      packageConfigExtraLibDirsStatic = getSymbolicPath <$> configExtraLibDirsStatic configFlags
+      packageConfigExtraFrameworkDirs = getSymbolicPath <$> configExtraFrameworkDirs configFlags
+      packageConfigExtraIncludeDirs = getSymbolicPath <$> configExtraIncludeDirs configFlags
       packageConfigProgramPaths = MapLast (Map.fromList configProgramPaths)
       packageConfigProgramArgs = MapMappend (Map.fromListWith (++) configProgramArgs)
 
@@ -926,6 +882,7 @@ convertLegacyBuildOnlyFlags
         , installUseSemaphore = projectConfigUseSemaphore
         , installKeepGoing = projectConfigKeepGoing
         , installOfflineMode = projectConfigOfflineMode
+        , installBuildTimings = projectConfigBuildTimings
         } = installFlags
 
 convertToLegacyProjectConfig :: ProjectConfig -> LegacyProjectConfig
@@ -1041,7 +998,7 @@ convertToLegacySharedConfig
           , installFineGrainedConflicts = projectConfigFineGrainedConflicts
           , installMinimizeConflictSet = projectConfigMinimizeConflictSet
           , installIndependentGoals = projectConfigIndependentGoals
-          , installPreferOldest = projectConfigPreferOldest
+          , installPreferVersion = projectConfigPreferVersion
           , installShadowPkgs = mempty -- projectConfigShadowPkgs,
           , installStrongFlags = projectConfigStrongFlags
           , installAllowBootLibInstalls = projectConfigAllowBootLibInstalls
@@ -1061,6 +1018,7 @@ convertToLegacySharedConfig
           , installKeepGoing = projectConfigKeepGoing
           , installRunTests = mempty
           , installOfflineMode = projectConfigOfflineMode
+          , installBuildTimings = projectConfigBuildTimings
           }
 
       projectFlags =
@@ -1346,18 +1304,18 @@ legacyProjectConfigFieldDescrs constraintSrc =
 -- allow http urls which don't parse as globs, and possibly some
 -- system-dependent file paths. So we parse fairly liberally as a token, but
 -- we allow @,@ inside matched @{}@ braces.
-parsePackageLocationTokenQ :: ReadP r String
+parsePackageLocationTokenQ :: ReadP String
 parsePackageLocationTokenQ =
   parseHaskellString
     Parse.<++ parsePackageLocationToken
   where
-    parsePackageLocationToken :: ReadP r String
+    parsePackageLocationToken :: ReadP String
     parsePackageLocationToken = fmap fst (Parse.gather outerTerm)
       where
         outerTerm = alternateEither1 outerToken (braces innerTerm)
         innerTerm = alternateEither innerToken (braces innerTerm)
-        outerToken = Parse.munch1 outerChar >> return ()
-        innerToken = Parse.munch1 innerChar >> return ()
+        outerToken = void $ Parse.munch1 outerChar
+        innerToken = void $ Parse.munch1 innerChar
         outerChar c = not (isSpace c || c == '{' || c == '}' || c == ',')
         innerChar c = not (isSpace c || c == '{' || c == '}')
         braces = Parse.between (Parse.char '{') (Parse.char '}')
@@ -1368,7 +1326,7 @@ parsePackageLocationTokenQ =
       , alternate1PQs
       , alternateQsP
       , alternate1QsP
-        :: ReadP r () -> ReadP r () -> ReadP r ()
+        :: ReadP () -> ReadP () -> ReadP ()
 
     alternateEither1 p q = alternate1PQs p q +++ alternate1QsP q p
     alternateEither p q = alternateEither1 p q +++ return ()
@@ -1497,6 +1455,7 @@ legacySharedConfigFieldDescrs constraintSrc =
           , "keep-going"
           , "offline"
           , "per-component"
+          , "build-timings"
           , -- solver flags:
             "max-backjumps"
           , "reorder-goals"
@@ -1505,6 +1464,7 @@ legacySharedConfigFieldDescrs constraintSrc =
           , "minimize-conflict-set"
           , "independent-goals"
           , "prefer-oldest"
+          , "prefer-version"
           , "strong-flags"
           , "allow-boot-library-installs"
           , "reject-unconstrained-dependencies"
@@ -1721,17 +1681,15 @@ legacyPackageConfigFieldDescrs =
         $ let name = "build-info"
            in FieldDescr
                 name
-                ( \f -> case f of
+                ( \case
                     Flag NoDumpBuildInfo -> Disp.text "False"
                     Flag DumpBuildInfo -> Disp.text "True"
                     _ -> Disp.empty
                 )
                 ( \line str _ -> case () of
                     _
-                      | str == "False" -> ParseOk [] (Flag NoDumpBuildInfo)
-                      | str == "True" -> ParseOk [] (Flag DumpBuildInfo)
-                      | lstr == "false" -> ParseOk [caseWarning name] (Flag NoDumpBuildInfo)
-                      | lstr == "true" -> ParseOk [caseWarning name] (Flag DumpBuildInfo)
+                      | lstr == "false" -> ParseOk [] (Flag NoDumpBuildInfo)
+                      | lstr == "true" -> ParseOk [] (Flag DumpBuildInfo)
                       | otherwise -> ParseFailed (NoParse name line)
                       where
                         lstr = lowercase str
@@ -1749,7 +1707,7 @@ legacyPackageConfigFieldDescrs =
         $ let name = "optimization"
            in FieldDescr
                 name
-                ( \f -> case f of
+                ( \case
                     Flag NoOptimisation -> Disp.text "False"
                     Flag NormalOptimisation -> Disp.text "True"
                     Flag MaximumOptimisation -> Disp.text "2"
@@ -1757,13 +1715,11 @@ legacyPackageConfigFieldDescrs =
                 )
                 ( \line str _ -> case () of
                     _
-                      | str == "False" -> ParseOk [] (Flag NoOptimisation)
-                      | str == "True" -> ParseOk [] (Flag NormalOptimisation)
                       | str == "0" -> ParseOk [] (Flag NoOptimisation)
                       | str == "1" -> ParseOk [] (Flag NormalOptimisation)
                       | str == "2" -> ParseOk [] (Flag MaximumOptimisation)
-                      | lstr == "false" -> ParseOk [caseWarning name] (Flag NoOptimisation)
-                      | lstr == "true" -> ParseOk [caseWarning name] (Flag NormalOptimisation)
+                      | lstr == "false" -> ParseOk [] (Flag NoOptimisation)
+                      | lstr == "true" -> ParseOk [] (Flag NormalOptimisation)
                       | otherwise -> ParseFailed (NoParse name line)
                       where
                         lstr = lowercase str
@@ -1774,7 +1730,7 @@ legacyPackageConfigFieldDescrs =
         let name = "debug-info"
          in FieldDescr
               name
-              ( \f -> case f of
+              ( \case
                   Flag NoDebugInfo -> Disp.text "False"
                   Flag MinimalDebugInfo -> Disp.text "1"
                   Flag NormalDebugInfo -> Disp.text "True"
@@ -1783,22 +1739,16 @@ legacyPackageConfigFieldDescrs =
               )
               ( \line str _ -> case () of
                   _
-                    | str == "False" -> ParseOk [] (Flag NoDebugInfo)
-                    | str == "True" -> ParseOk [] (Flag NormalDebugInfo)
                     | str == "0" -> ParseOk [] (Flag NoDebugInfo)
                     | str == "1" -> ParseOk [] (Flag MinimalDebugInfo)
                     | str == "2" -> ParseOk [] (Flag NormalDebugInfo)
                     | str == "3" -> ParseOk [] (Flag MaximalDebugInfo)
-                    | lstr == "false" -> ParseOk [caseWarning name] (Flag NoDebugInfo)
-                    | lstr == "true" -> ParseOk [caseWarning name] (Flag NormalDebugInfo)
+                    | lstr == "false" -> ParseOk [] (Flag NoDebugInfo)
+                    | lstr == "true" -> ParseOk [] (Flag NormalDebugInfo)
                     | otherwise -> ParseFailed (NoParse name line)
                     where
                       lstr = lowercase str
               )
-
-    caseWarning name =
-      PWarning $
-        "The '" ++ name ++ "' field is case sensitive, use 'True' or 'False'."
 
     prefixTest name
       | "test-" `isPrefixOf` name = name
@@ -1806,7 +1756,6 @@ legacyPackageConfigFieldDescrs =
 
 legacyPackageConfigFGSectionDescrs
   :: ( FieldGrammar c g
-     , Applicative (g SourceRepoList)
      , c (Identity RepoType)
      , c (List NoCommaFSep FilePathNT String)
      , c (NonEmpty' NoCommaFSep Token String)
@@ -1838,7 +1787,6 @@ legacyPackageConfigSectionDescrs =
 
 packageRepoSectionDescr
   :: ( FieldGrammar c g
-     , Applicative (g SourceRepoList)
      , c (Identity RepoType)
      , c (List NoCommaFSep FilePathNT String)
      , c (NonEmpty' NoCommaFSep Token String)
@@ -1920,7 +1868,7 @@ packageSpecificOptionsSectionDescr =
                 { legacySpecificConfig =
                     MapMappend $
                       Map.insertWith
-                        mappend
+                        (<>)
                         pkgname
                         pkgconf
                         (getMapMappend $ legacySpecificConfig projconf)
@@ -2014,7 +1962,7 @@ programDbOptions progDb showOrParseArgs get' set =
       option
         ""
         [prog ++ "-options"]
-        ("give extra options to " ++ prog)
+        ("Give extra options to " ++ prog)
         get'
         set
         ( reqArg'
@@ -2096,7 +2044,7 @@ monoidFieldParsec
 monoidFieldParsec name showF readF get' set =
   liftField get' set' $ ParseUtils.fieldParsec name showF readF
   where
-    set' xs b = set (get' b `mappend` xs) b
+    set' xs b = set (get' b <> xs) b
 
 -- TODO: [code cleanup] local redefinition that should replace the version in
 -- D.ParseUtils called showFilePath. This version escapes "." and "--" which

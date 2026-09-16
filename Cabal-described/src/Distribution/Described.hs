@@ -1,6 +1,4 @@
-{-# LANGUAGE FlexibleInstances   #-}
 {-# LANGUAGE OverloadedStrings   #-}
-{-# LANGUAGE ScopedTypeVariables #-}
 module Distribution.Described (
     Described (..),
     describeDoc,
@@ -43,6 +41,7 @@ import Prelude
        , ($), (.), (<$>)
        )
 
+import Data.Coerce           (Coercible)
 import Data.Functor.Identity (Identity (..))
 import Data.Maybe            (fromMaybe)
 import Data.Proxy            (Proxy (..))
@@ -65,7 +64,6 @@ import qualified Text.PrettyPrint           as PP
 import Distribution.Utils.GrammarRegex
 
 -- Types
-import Distribution.Compat.Newtype
 import Distribution.Compiler                       (CompilerFlavor, CompilerId, knownCompilerFlavors)
 import Distribution.PackageDescription.FieldGrammar (CompatLicenseFile, CompatDataDir)
 import Distribution.FieldGrammar.Newtypes
@@ -426,7 +424,7 @@ instance Described IncludeRenaming where
         mr = describe (Proxy :: Proxy ModuleRenaming)
 
 instance Described Language where
-    describe _ = REUnion $ (REString . show) <$> reverse knownLanguages
+    describe _ = REUnion $ REString . show <$> reverse knownLanguages
 
 instance Described LegacyExeDependency where
     describe _ = RETodo
@@ -555,10 +553,10 @@ instance DescribeSep VCat        where describeSep _ = reCommaList
 instance DescribeSep FSep        where describeSep _ = reOptCommaList
 instance DescribeSep NoCommaFSep where describeSep _ = reSpacedList
 
-instance (Newtype a b, DescribeSep sep, Described b) => Described (List sep b a) where
+instance (Coercible a b, DescribeSep sep, Described b) => Described (List sep b a) where
     describe _ = describeSep (Proxy :: Proxy sep) (describe (Proxy :: Proxy b))
 
-instance (Newtype a b, Ord a, DescribeSep sep, Described b) => Described (Set' sep b a) where
+instance (Coercible a b, Ord a, DescribeSep sep, Described b) => Described (Set' sep b a) where
     describe _ = describeSep (Proxy :: Proxy sep) (describe (Proxy :: Proxy b))
 
 instance Described Token where

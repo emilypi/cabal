@@ -1,10 +1,4 @@
 {-# LANGUAGE DataKinds #-}
-{-# LANGUAGE DeriveDataTypeable #-}
-{-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE RankNTypes #-}
-
------------------------------------------------------------------------------
 
 -- |
 -- Module      :  Distribution.Types.PackageDescription
@@ -156,7 +150,7 @@ data PackageDescription = PackageDescription
 instance Binary PackageDescription
 instance Structured PackageDescription
 
-instance NFData PackageDescription where rnf = genericRnf
+instance NFData PackageDescription
 
 instance Package PackageDescription where
   packageId = package
@@ -380,7 +374,7 @@ updatePackageDescription (mb_lib_bi, exe_bi) p =
     }
   where
     updateLibrary :: Maybe BuildInfo -> Maybe Library -> Maybe Library
-    updateLibrary (Just bi) (Just lib) = Just (lib{libBuildInfo = bi `mappend` libBuildInfo lib})
+    updateLibrary (Just bi) (Just lib) = Just (lib{libBuildInfo = bi <> libBuildInfo lib})
     updateLibrary Nothing mb_lib = mb_lib
     updateLibrary (Just _) Nothing = Nothing
 
@@ -402,7 +396,7 @@ updatePackageDescription (mb_lib_bi, exe_bi) p =
     -- \^list with exeName updated
     updateExecutable _ [] = []
     updateExecutable exe_bi'@(name, bi) (exe : exes)
-      | exeName exe == name = exe{buildInfo = bi `mappend` buildInfo exe} : exes
+      | exeName exe == name = exe{buildInfo = bi <> buildInfo exe} : exes
       | otherwise = exe : updateExecutable exe_bi' exes
 
 -- -----------------------------------------------------------------------------
@@ -434,15 +428,15 @@ enabledComponents pkg enabled = filter (componentEnabled enabled) $ pkgBuildable
 
 lookupComponent :: PackageDescription -> ComponentName -> Maybe Component
 lookupComponent pkg (CLibName name) =
-  fmap CLib $ find ((name ==) . libName) (allLibraries pkg)
+  CLib <$> find ((name ==) . libName) (allLibraries pkg)
 lookupComponent pkg (CFLibName name) =
-  fmap CFLib $ find ((name ==) . foreignLibName) (foreignLibs pkg)
+  CFLib <$> find ((name ==) . foreignLibName) (foreignLibs pkg)
 lookupComponent pkg (CExeName name) =
-  fmap CExe $ find ((name ==) . exeName) (executables pkg)
+  CExe <$> find ((name ==) . exeName) (executables pkg)
 lookupComponent pkg (CTestName name) =
-  fmap CTest $ find ((name ==) . testName) (testSuites pkg)
+  CTest <$> find ((name ==) . testName) (testSuites pkg)
 lookupComponent pkg (CBenchName name) =
-  fmap CBench $ find ((name ==) . benchmarkName) (benchmarks pkg)
+  CBench <$> find ((name ==) . benchmarkName) (benchmarks pkg)
 
 getComponent :: PackageDescription -> ComponentName -> Component
 getComponent pkg cname = fromMaybe missingComponent (lookupComponent pkg cname)

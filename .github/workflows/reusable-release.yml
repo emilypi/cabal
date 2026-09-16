@@ -8,7 +8,7 @@ on:
         type: string
       ghc:
         type: string
-        default: 9.10.2
+        default: 9.10.3
       # speed up installation by skipping docs
       # starting with GHC 9.10.x, we also need to pass the 'install_extra' target
       ghc_targets:
@@ -24,9 +24,10 @@ on:
 env:
   GHC_VERSION: ${{ inputs.ghc }}
   GHC_TARGETS: ${{ inputs.ghc_targets }}
-  # This shouldn't be necessary, but cabal developers
-  # want to build with 9.10.2, which causes test failures
-  # when used as runtime GHC version as well.
+  # This shouldn't be necessary, but cabal developers want to build with 9.10.3,
+  # which causes test failures when used as runtime GHC version as well. For
+  # more detail, please see the note and link to the issue in
+  # .github/scripts/test.bash
   GHC_TEST_VERSION: 9.6.7
   GHC_TEST_TARGETS: "install_bin install_lib update_package_db"
   CABAL_VERSION: ${{ inputs.cabal }}
@@ -70,82 +71,12 @@ jobs:
       fail-fast: false
       matrix:
         branch: ${{ fromJSON(inputs.branches) }}
-        platform: [ { image: "debian:11"
-                    , installCmd: "apt-get update && apt-get install -y"
-                    , toolRequirements: "${{ needs.tool-output.outputs.apt_tools }}"
-                    , DISTRO: "Debian"
-                    , ARTIFACT: "x86_64-linux-deb11"
-                    , ADD_CABAL_ARGS: "--enable-split-sections"
-                    },
-                    { image: "debian:12"
-                    , installCmd: "apt-get update && apt-get install -y"
-                    , toolRequirements: "${{ needs.tool-output.outputs.apt_tools }}"
-                    , DISTRO: "Debian"
-                    , ARTIFACT: "x86_64-linux-deb12"
-                    , ADD_CABAL_ARGS: "--enable-split-sections"
-                    },
-                    { image: "ubuntu:20.04"
-                    , installCmd: "apt-get update && apt-get install -y"
-                    , toolRequirements: "${{ needs.tool-output.outputs.apt_tools }}"
-                    , DISTRO: "Ubuntu"
-                    , ARTIFACT: "x86_64-linux-ubuntu20.04"
-                    , ADD_CABAL_ARGS: "--enable-split-sections"
-                    },
-                    { image: "ubuntu:22.04"
-                    , installCmd: "apt-get update && apt-get install -y"
-                    , toolRequirements: "${{ needs.tool-output.outputs.apt_tools }}"
-                    , DISTRO: "Ubuntu"
-                    , ARTIFACT: "x86_64-linux-ubuntu22.04"
-                    , ADD_CABAL_ARGS: "--enable-split-sections"
-                    },
-                    { image: "ubuntu:24.04"
-                    , installCmd: "apt-get update && apt-get install -y"
-                    , toolRequirements: "${{ needs.tool-output.outputs.apt_tools_ncurses6 }}"
-                    , DISTRO: "Ubuntu"
-                    , ARTIFACT: "x86_64-linux-ubuntu24.04"
-                    , ADD_CABAL_ARGS: "--enable-split-sections"
-                    },
-                    { image: "fedora:33"
-                    , installCmd: "dnf install -y"
-                    , toolRequirements: "${{ needs.tool-output.outputs.rpm_tools }}"
-                    , DISTRO: "Fedora"
-                    , ARTIFACT: "x86_64-linux-fedora33"
-                    , ADD_CABAL_ARGS: "--enable-split-sections"
-                    },
-                    { image: "fedora:36"
-                    , installCmd: "dnf install -y"
-                    , toolRequirements: "${{ needs.tool-output.outputs.rpm_tools }}"
-                    , DISTRO: "Fedora"
-                    , ARTIFACT: "x86_64-linux-fedora36"
-                    , ADD_CABAL_ARGS: "--enable-split-sections"
-                    },
-                    { image: "fedora:38"
-                    , installCmd: "dnf install -y"
-                    , toolRequirements: "${{ needs.tool-output.outputs.rpm_tools }}"
-                    , DISTRO: "Fedora"
-                    , ARTIFACT: "x86_64-linux-fedora38"
-                    , ADD_CABAL_ARGS: "--enable-split-sections"
-                    },
-                    { image: "rockylinux:8"
-                    , installCmd: "yum -y install epel-release && yum install -y --allowerasing"
-                    , toolRequirements: "${{ needs.tool-output.outputs.rpm_tools }}"
-                    , DISTRO: "Unknown"
-                    , ARTIFACT: "x86_64-linux-rocky8"
-                    , ADD_CABAL_ARGS: "--enable-split-sections"
-                    },
-                    { image: "alpine:3.20"
+        platform: [ { image: "alpine:3.21"
                     , installCmd: "apk update && apk add"
                     , toolRequirements: "${{ needs.tool-output.outputs.apk_tools }}"
                     , DISTRO: "Unknown"
                     , ARTIFACT: "x86_64-linux-unknown"
                     , ADD_CABAL_ARGS: "--enable-split-sections --enable-executable-static"
-                    },
-                    { image: "alpine:3.20"
-                    , installCmd: "apk update && apk add"
-                    , toolRequirements: "${{ needs.tool-output.outputs.apk_tools }}"
-                    , DISTRO: "Unknown"
-                    , ARTIFACT: "x86_64-linux-alpine320"
-                    , ADD_CABAL_ARGS: "--enable-split-sections"
                     }
                   ]
     container:
@@ -161,7 +92,7 @@ jobs:
         with:
           cabal: ${{ env.CABAL_VERSION }}
 
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ matrix.branch }}
 
@@ -200,12 +131,12 @@ jobs:
       ADD_CABAL_ARGS: "--enable-split-sections --enable-executable-static"
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ matrix.branch }}
 
       - name: Run build (32 bit linux)
-        uses: docker://i386/alpine:3.20
+        uses: docker://i386/alpine:3.21
         with:
           args: sh -c "apk update && apk add curl bash git ${{ needs.tool-output.outputs.apk_tools }} && export PATH=$HOME/.ghcup/bin:$PATH && curl --proto '=https' --tlsv1.2 -sSf https://get-ghcup.haskell.org | sh && ghcup install cabal ${{ env.CABAL_VERSION }} && bash .github/scripts/build.bash"
 
@@ -232,31 +163,16 @@ jobs:
       matrix:
         branch: ${{ fromJSON(inputs.branches) }}
         platform: [ { ARCH: "ARM64"
-                    , DISTRO: "Debian"
-                    , ARTIFACT: "aarch64-linux-deb11"
-                    },
-                    { ARCH: "ARM64"
                     , DISTRO: "Alpine"
                     , ARTIFACT: "aarch64-linux-unknown"
                     }
                   ]
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ matrix.branch }}
 
-      - if: matrix.platform.DISTRO == 'Debian'
-        uses: docker://arm64v8/debian:11
-        name: Run build (aarch64 linux)
-        with:
-          args: sh -c "apt-get update && apt-get install -y curl bash git ${{ needs.tool-output.outputs.apt_tools }} && export PATH=$HOME/.ghcup/bin:$PATH && curl --proto '=https' --tlsv1.2 -sSf https://get-ghcup.haskell.org | sh && ghcup install cabal ${{ env.CABAL_VERSION }} && bash .github/scripts/build.bash"
-        env:
-          ARTIFACT: ${{ matrix.platform.ARTIFACT }}
-          DISTRO: ${{ matrix.platform.DISTRO }}
-          ADD_CABAL_ARGS: ""
-
-      - if: matrix.platform.DISTRO == 'Alpine'
-        uses: docker://arm64v8/alpine:3.20
+      - uses: docker://arm64v8/alpine:3.21
         name: Run build (aarch64 linux alpine)
         with:
           args: sh -c "apk update && apk add curl bash git ${{ needs.tool-output.outputs.apk_tools }} && export PATH=$HOME/.ghcup/bin:$PATH && curl --proto '=https' --tlsv1.2 -sSf https://get-ghcup.haskell.org | sh && ghcup install cabal ${{ env.CABAL_VERSION }} && bash .github/scripts/build.bash"
@@ -290,7 +206,7 @@ jobs:
       matrix:
         branch: ${{ fromJSON(inputs.branches) }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ matrix.branch }}
 
@@ -330,7 +246,7 @@ jobs:
       matrix:
         branch: ${{ fromJSON(inputs.branches) }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ matrix.branch }}
 
@@ -363,13 +279,12 @@ jobs:
       TARBALL_EXT: "zip"
       DISTRO: na
       CABAL_DIR: "C:\\Users\\runneradmin\\AppData\\Roaming\\cabal"
-      GHCUP_INSTALL_BASE_PREFIX: "/c"
     strategy:
       fail-fast: false
       matrix:
         branch: ${{ fromJSON(inputs.branches) }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ matrix.branch }}
 
@@ -423,7 +338,7 @@ jobs:
       matrix:
         branch: ${{ fromJSON(inputs.branches) }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ matrix.branch }}
 
@@ -463,71 +378,11 @@ jobs:
       fail-fast: false
       matrix:
         branch: ${{ fromJSON(inputs.branches) }}
-        platform: [ { image: "debian:11"
-                    , installCmd: "apt-get update && apt-get install -y"
-                    , toolRequirements: "${{ needs.tool-output.outputs.apt_tools }}"
-                    , DISTRO: "Debian"
-                    , ARTIFACT: "x86_64-linux-deb11"
-                    },
-                    { image: "debian:12"
-                    , installCmd: "apt-get update && apt-get install -y"
-                    , toolRequirements: "${{ needs.tool-output.outputs.apt_tools }}"
-                    , DISTRO: "Debian"
-                    , ARTIFACT: "x86_64-linux-deb12"
-                    },
-                    { image: "ubuntu:20.04"
-                    , installCmd: "apt-get update && apt-get install -y"
-                    , toolRequirements: "${{ needs.tool-output.outputs.apt_tools }}"
-                    , DISTRO: "Ubuntu"
-                    , ARTIFACT: "x86_64-linux-ubuntu20.04"
-                    },
-                    { image: "ubuntu:22.04"
-                    , installCmd: "apt-get update && apt-get install -y"
-                    , toolRequirements: "${{ needs.tool-output.outputs.apt_tools }}"
-                    , DISTRO: "Ubuntu"
-                    , ARTIFACT: "x86_64-linux-ubuntu22.04"
-                    },
-                    { image: "ubuntu:24.04"
-                    , installCmd: "apt-get update && apt-get install -y"
-                    , toolRequirements: "${{ needs.tool-output.outputs.apt_tools_ncurses6 }}"
-                    , DISTRO: "Ubuntu"
-                    , ARTIFACT: "x86_64-linux-ubuntu24.04"
-                    },
-                    { image: "fedora:33"
-                    , installCmd: "dnf install -y"
-                    , toolRequirements: "${{ needs.tool-output.outputs.rpm_tools }}"
-                    , DISTRO: "Fedora"
-                    , ARTIFACT: "x86_64-linux-fedora33"
-                    },
-                    { image: "fedora:36"
-                    , installCmd: "dnf install -y"
-                    , toolRequirements: "${{ needs.tool-output.outputs.rpm_tools }}"
-                    , DISTRO: "Fedora"
-                    , ARTIFACT: "x86_64-linux-fedora36"
-                    },
-                    { image: "fedora:38"
-                    , installCmd: "dnf install -y"
-                    , toolRequirements: "${{ needs.tool-output.outputs.rpm_tools }}"
-                    , DISTRO: "Fedora"
-                    , ARTIFACT: "x86_64-linux-fedora38"
-                    },
-                    { image: "rockylinux:8"
-                    , installCmd: "yum -y install epel-release && yum install -y --allowerasing"
-                    , toolRequirements: "${{ needs.tool-output.outputs.rpm_tools }}"
-                    , DISTRO: "Unknown"
-                    , ARTIFACT: "x86_64-linux-rocky8"
-                    },
-                    { image: "alpine:3.20"
+        platform: [ { image: "alpine:3.21"
                     , installCmd: "apk update && apk add"
                     , toolRequirements: "${{ needs.tool-output.outputs.apk_tools }}"
                     , DISTRO: "Unknown"
                     , ARTIFACT: "x86_64-linux-unknown"
-                    },
-                    { image: "alpine:3.20"
-                    , installCmd: "apk update && apk add"
-                    , toolRequirements: "${{ needs.tool-output.outputs.apk_tools }}"
-                    , DISTRO: "Unknown"
-                    , ARTIFACT: "x86_64-linux-alpine320"
                     }
                   ]
     container:
@@ -538,7 +393,7 @@ jobs:
         run: |
           ${{ matrix.platform.installCmd }} curl bash git ${{ matrix.platform.toolRequirements }}
 
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ matrix.branch }}
 
@@ -583,7 +438,7 @@ jobs:
 #      matrix:
 #        branch: ${{ fromJSON(inputs.branches) }}
 #    steps:
-#      - uses: actions/checkout@v6
+#      - uses: actions/checkout@v7
 #        with:
 #          ref: ${{ matrix.branch }}
 #
@@ -593,7 +448,7 @@ jobs:
 #          path: ./out
 #
 #      - name: Run build (32 bit linux)
-#        uses: docker://i386/alpine:3.20
+#        uses: docker://i386/alpine:3.21
 #        with:
 #          args: sh -c "apk update && apk add curl bash git ${{ needs.tool-output.outputs.apk_tools }} groff && git config --system --add safe.directory $GITHUB_WORKSPACE && export PATH=$HOME/.ghcup/bin:$PATH && curl --proto '=https' --tlsv1.2 -sSf https://get-ghcup.haskell.org | sh && ghcup install cabal ${{ env.CABAL_VERSION }} && bash .github/scripts/build.bash"
 
@@ -611,16 +466,12 @@ jobs:
       matrix:
         branch: ${{ fromJSON(inputs.branches) }}
         platform: [ { ARCH: "ARM64"
-                    , DISTRO: "Debian"
-                    , ARTIFACT: "aarch64-linux-deb11"
-                    },
-                    { ARCH: "ARM64"
                     , DISTRO: "Alpine"
                     , ARTIFACT: "aarch64-linux-unknown"
                     }
                   ]
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ matrix.branch }}
 
@@ -629,17 +480,7 @@ jobs:
           name: artifacts-${{ matrix.platform.ARTIFACT }}-${{ matrix.branch }}
           path: ./out
 
-      - if: matrix.platform.DISTRO == 'Debian'
-        uses: docker://arm64v8/debian:11
-        name: Run build (aarch64 linux)
-        with:
-          args: sh -c "apt-get update && apt-get install -y curl bash git groff-base ${{ needs.tool-output.outputs.apt_tools }} && git config --system --add safe.directory $GITHUB_WORKSPACE && export PATH=$HOME/.ghcup/bin:$PATH && curl --proto '=https' --tlsv1.2 -sSf https://get-ghcup.haskell.org | sh && ghcup install cabal ${{ env.CABAL_VERSION }} && bash .github/scripts/test.bash"
-        env:
-          ARTIFACT: ${{ matrix.platform.ARTIFACT }}
-          DISTRO: ${{ matrix.platform.DISTRO }}
-
-      - if: matrix.platform.DISTRO == 'Alpine'
-        uses: docker://arm64v8/alpine:3.20
+      - uses: docker://arm64v8/alpine:3.21
         name: Run build (aarch64 linux alpine)
         with:
           args: sh -c "apk update && apk add curl bash git groff ${{ needs.tool-output.outputs.apk_tools }} && git config --system --add safe.directory $GITHUB_WORKSPACE && export PATH=$HOME/.ghcup/bin:$PATH && curl --proto '=https' --tlsv1.2 -sSf https://get-ghcup.haskell.org | sh && ghcup install cabal ${{ env.CABAL_VERSION }} && bash .github/scripts/test.bash"
@@ -664,7 +505,7 @@ jobs:
       matrix:
         branch: ${{ fromJSON(inputs.branches) }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ matrix.branch }}
 
@@ -705,7 +546,7 @@ jobs:
       matrix:
         branch: ${{ fromJSON(inputs.branches) }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ matrix.branch }}
 
@@ -735,13 +576,12 @@ jobs:
       TARBALL_EXT: "zip"
       DISTRO: na
       CABAL_DIR: "C:\\Users\\runneradmin\\AppData\\Roaming\\cabal"
-      GHCUP_INSTALL_BASE_PREFIX: "/c"
     strategy:
       fail-fast: false
       matrix:
         branch: ${{ fromJSON(inputs.branches) }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ matrix.branch }}
 
@@ -790,7 +630,7 @@ jobs:
       matrix:
         branch: ${{ fromJSON(inputs.branches) }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ matrix.branch }}
 

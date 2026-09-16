@@ -1,8 +1,4 @@
-{-# LANGUAGE BangPatterns #-}
-{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GADTs #-}
-{-# LANGUAGE RankNTypes #-}
-{-# LANGUAGE ScopedTypeVariables #-}
 
 module Distribution.Parsec
   ( Parsec (..)
@@ -144,8 +140,6 @@ instance Alternative ParsecParser where
   {-# INLINE some #-}
 
 instance Monad ParsecParser where
-  return = pure
-
   m >>= k = PP $ \v -> unPP m v >>= \x -> unPP (k x) v
   {-# INLINE (>>=) #-}
   (>>) = (*>)
@@ -252,15 +246,11 @@ instance Parsec Bool where
   parsec = P.munch1 isAlpha >>= postprocess
     where
       postprocess str
-        | str == "True" = pure True
-        | str == "False" = pure False
-        | lstr == "true" = parsecWarning PWTBoolCase caseWarning *> pure True
-        | lstr == "false" = parsecWarning PWTBoolCase caseWarning *> pure False
+        | lstr == "true" = pure True
+        | lstr == "false" = pure False
         | otherwise = fail $ "Not a boolean: " ++ str
         where
           lstr = map toLower str
-          caseWarning =
-            "Boolean values are case sensitive, use 'True' or 'False'."
 
 instance Parsec a => Parsec (Last a) where
   parsec = parsecLast

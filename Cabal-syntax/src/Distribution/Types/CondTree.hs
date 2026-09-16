@@ -1,8 +1,3 @@
-{-# LANGUAGE DeriveDataTypeable #-}
-{-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE DeriveTraversable #-}
-{-# LANGUAGE ScopedTypeVariables #-}
-
 module Distribution.Types.CondTree
   ( CondTree (..)
   , CondBranch (..)
@@ -61,13 +56,12 @@ data CondTree v a = CondNode
 
 instance (Binary v, Binary a) => Binary (CondTree v a)
 instance (Structured v, Structured a) => Structured (CondTree v a)
-instance (NFData v, NFData a) => NFData (CondTree v a) where rnf = genericRnf
+instance (NFData v, NFData a) => NFData (CondTree v a)
 
 instance Semigroup a => Semigroup (CondTree v a) where
   (CondNode a bs) <> (CondNode a' bs') = CondNode (a <> a') (bs <> bs')
 
-instance (Semigroup a, Monoid a) => Monoid (CondTree v a) where
-  mappend = (<>)
+instance Monoid a => Monoid (CondTree v a) where
   mempty = CondNode mempty mempty
 
 -- | A 'CondBranch' represents a conditional branch, e.g., @if
@@ -82,7 +76,7 @@ data CondBranch v a = CondBranch
 
 instance (Binary v, Binary a) => Binary (CondBranch v a)
 instance (Structured v, Structured a) => Structured (CondBranch v a)
-instance (NFData v, NFData a) => NFData (CondBranch v a) where rnf = genericRnf
+instance (NFData v, NFData a) => NFData (CondBranch v a)
 
 condIfThen :: Condition v -> CondTree v a -> CondBranch v a
 condIfThen c t = CondBranch c t Nothing
@@ -125,10 +119,7 @@ traverseCondTreeV f (CondNode a ifs) =
 -- | @@Traversal@@ for the data
 traverseCondBranchA :: L.Traversal (CondBranch v a) (CondBranch v b) a b
 traverseCondBranchA f (CondBranch cnd t me) =
-  CondBranch
-    <$> pure cnd
-    <*> traverseCondTreeA f t
-    <*> traverse (traverseCondTreeA f) me
+  CondBranch cnd <$> traverseCondTreeA f t <*> traverse (traverseCondTreeA f) me
 
 -- | @@Traversal@@ for the variables
 traverseCondBranchV :: L.Traversal (CondBranch v a) (CondBranch w a) v w

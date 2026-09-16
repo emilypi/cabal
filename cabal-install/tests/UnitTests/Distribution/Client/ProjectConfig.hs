@@ -1,13 +1,6 @@
-{-# LANGUAGE CPP #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE RecordWildCards #-}
-{-# LANGUAGE TupleSections #-}
 {-# OPTIONS_GHC -Wno-orphans #-}
-
--- simplifier goes nuts otherwise
-#if __GLASGOW_HASKELL__ < 806
-{-# OPTIONS_GHC -funfolding-use-threshold=30 #-}
-#endif
 
 module UnitTests.Distribution.Client.ProjectConfig (tests) where
 
@@ -27,7 +20,6 @@ import System.IO.Unsafe (unsafePerformIO)
 import Distribution.Deprecated.ParseUtils
 import qualified Distribution.Deprecated.ReadP as Parse
 
-import Distribution.Compiler
 import Distribution.Package
 import Distribution.PackageDescription
 import qualified Distribution.Simple.InstallDirs as InstallDirs
@@ -36,7 +28,6 @@ import Distribution.Simple.Program.Types
 import Distribution.Simple.Utils (toUTF8BS)
 import Distribution.System (OS (Windows), buildOS)
 import Distribution.Types.PackageVersionConstraint
-import Distribution.Version
 
 import Distribution.Parsec
 import Distribution.Pretty
@@ -74,16 +65,10 @@ tests =
       , testProperty "buildonly" prop_roundtrip_legacytypes_buildonly
       , testProperty "specific" prop_roundtrip_legacytypes_specific
       ]
-        ++
-        -- a couple tests seem to trigger a RTS fault in ghc-7.6 and older
-        -- unclear why as of yet
-        concat
-          [ [ testProperty "shared" prop_roundtrip_legacytypes_shared
-            , testProperty "local" prop_roundtrip_legacytypes_local
-            , testProperty "all" prop_roundtrip_legacytypes_all
-            ]
-          | not usingGhc76orOlder
-          ]
+        ++ [ testProperty "shared" prop_roundtrip_legacytypes_shared
+           , testProperty "local" prop_roundtrip_legacytypes_local
+           , testProperty "all" prop_roundtrip_legacytypes_all
+           ]
   , testGroup
       "individual parser tests"
       [ testProperty "package location" prop_parsePackageLocationTokenQ
@@ -103,11 +88,6 @@ tests =
   , testGetProjectRootUsability
   , testFindProjectRoot
   ]
-  where
-    usingGhc76orOlder =
-      case buildCompilerId of
-        CompilerId GHC v -> v < mkVersion [7, 7]
-        _ -> False
 
 testGetProjectRootUsability :: TestTree
 testGetProjectRootUsability =
@@ -377,7 +357,7 @@ prop_roundtrip_printparse_specific config =
 -- | Helper to parse a given string
 --
 -- Succeeds only if there is a unique complete parse
-runReadP :: Parse.ReadP a a -> String -> Maybe a
+runReadP :: Parse.ReadP a -> String -> Maybe a
 runReadP parser s = case [x | (x, "") <- Parse.readP_to_S parser s] of
   [x'] -> Just x'
   _ -> Nothing
@@ -458,9 +438,8 @@ instance Arbitrary ProjectConfig where
         , projectConfigProvenance = x6'
         , projectConfigLocalPackages = x7'
         , projectConfigSpecificPackage =
-            ( MapMappend
-                (fmap getNonMEmpty x8')
-            )
+            MapMappend
+              (fmap getNonMEmpty x8')
         , projectConfigAllPackages = x9'
         }
       | ((x0', x1', x2', x3'), (x4', x5', x6', x7', x8', x9')) <-
@@ -538,6 +517,7 @@ instance Arbitrary ProjectConfigBuildOnly where
       <*> (fmap getShortToken <$> arbitrary)
       <*> (fmap getShortToken <$> arbitrary)
       <*> arbitrary
+      <*> arbitrary
     where
       arbitraryNumJobs = fmap (fmap getPositive) <$> arbitrary
 
@@ -562,6 +542,7 @@ instance Arbitrary ProjectConfigBuildOnly where
       , projectConfigCacheDir = x15
       , projectConfigLogsDir = x16
       , projectConfigClientInstallFlags = x17
+      , projectConfigBuildTimings = x20
       } =
       [ ProjectConfigBuildOnly
         { projectConfigVerbosity = x00'
@@ -583,17 +564,18 @@ instance Arbitrary ProjectConfigBuildOnly where
         , projectConfigCacheDir = x15
         , projectConfigLogsDir = x16
         , projectConfigClientInstallFlags = x17'
+        , projectConfigBuildTimings = x20'
         }
       | ( (x00', x01', x02', x03', x04')
           , (x05', x06', x07', x09')
           , (x10', x11', x12', x14')
-          , (x17', x18', x19')
+          , (x17', x18', x19', x20')
           ) <-
           shrink
             ( (x00, x01, x02, x03, x04)
             , (x05, x06, x07, preShrink_NumJobs x09)
             , (x10, x11, x12, x14)
-            , (x17, x18, x19)
+            , (x17, x18, x19, x20)
             )
       ]
       where
@@ -636,7 +618,7 @@ instance Arbitrary ProjectConfigShared where
     projectConfigOnlyConstrained <- arbitrary
     projectConfigPerComponent <- arbitrary
     projectConfigIndependentGoals <- arbitrary
-    projectConfigPreferOldest <- arbitrary
+    projectConfigPreferVersion <- arbitrary
     projectConfigProgPathExtra <- toNubList <$> listOf arbitraryShortToken
     projectConfigMultiRepl <- arbitrary
     return ProjectConfigShared{..}
@@ -648,8 +630,8 @@ instance Arbitrary ProjectConfigShared where
 
   shrink ProjectConfigShared{..} =
     runShrinker $
-      pure ProjectConfigShared
-        <*> shrinker projectConfigDistDir
+      ProjectConfigShared
+        <$> shrinker projectConfigDistDir
         <*> shrinker projectConfigConfigFile
         <*> shrinker projectConfigProjectDir
         <*> shrinker projectConfigProjectFile
@@ -683,7 +665,7 @@ instance Arbitrary ProjectConfigShared where
         <*> shrinker projectConfigOnlyConstrained
         <*> shrinker projectConfigPerComponent
         <*> shrinker projectConfigIndependentGoals
-        <*> shrinker projectConfigPreferOldest
+        <*> shrinker projectConfigPreferVersion
         <*> shrinker projectConfigProgPathExtra
         <*> shrinker projectConfigMultiRepl
     where
@@ -784,7 +766,7 @@ instance Arbitrary PackageConfig where
       arbitraryProgramName =
         elements
           [ programName prog
-          | (prog, _) <- knownPrograms (defaultProgramDb)
+          | (prog, _) <- knownPrograms defaultProgramDb
           ]
 
   shrink
@@ -993,8 +975,8 @@ instance f ~ [] => Arbitrary (SourceRepositoryPackage f) where
 
   shrink SourceRepositoryPackage{..} =
     runShrinker $
-      pure SourceRepositoryPackage
-        <*> shrinker srpType
+      SourceRepositoryPackage
+        <$> shrinker srpType
         <*> shrinkerAla ShortToken srpLocation
         <*> shrinkerAla (fmap ShortToken) srpTag
         <*> shrinkerAla (fmap ShortToken) srpBranch
@@ -1048,8 +1030,13 @@ instance Arbitrary MinimizeConflictSet where
 instance Arbitrary IndependentGoals where
   arbitrary = IndependentGoals <$> arbitrary
 
-instance Arbitrary PreferOldest where
-  arbitrary = PreferOldest <$> arbitrary
+instance Arbitrary PreferVersion where
+  arbitrary =
+    oneof
+      [ pure PreferOldest
+      , pure PreferLatest
+      , pure PreferInstalledOrLatest
+      ]
 
 instance Arbitrary StrongFlags where
   arbitrary = StrongFlags <$> arbitrary

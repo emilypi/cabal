@@ -89,7 +89,9 @@ local_packages: List[PackageName] = [ "Cabal-syntax"
                                     , "Cabal-tests"
                                     , "Cabal-tree-diff"
                                     , "cabal-install-solver"
-                                    , "cabal-install" ]
+                                    , "cabal-install"
+                                    , "hooks-exe"
+                                    ]
 
 # Value passed to setup build -j {jobs_amount}
 # 1 is not set by default.
@@ -273,10 +275,12 @@ UnitId = NewType('UnitId', str)
 PlanUnit = NewType('PlanUnit', dict)
 
 def bootstrap(info: BootstrapInfo, ghc: Compiler) -> None:
-    if not PKG_DB.exists():
-        print(f'Creating package database {PKG_DB}')
-        PKG_DB.parent.mkdir(parents=True, exist_ok=True)
-        subprocess_run([ghc.ghc_pkg_path, 'init', PKG_DB])
+    if PKG_DB.exists():
+        print(f'Deleting stale package database {PKG_DB}')
+        shutil.rmtree(PKG_DB)
+    print(f'Creating package database {PKG_DB}')
+    PKG_DB.parent.mkdir(parents=True, exist_ok=True)
+    subprocess_run([ghc.ghc_pkg_path, 'init', PKG_DB])
 
     for dep in info.builtin:
         check_builtin(dep, ghc)

@@ -1,8 +1,6 @@
 {-# LANGUAGE DataKinds #-}
-{-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE DerivingVia #-}
 {-# LANGUAGE PatternSynonyms #-}
-{-# LANGUAGE RankNTypes #-}
 
 -- |
 -- Module      :  Distribution.Simple.Setup.Common
@@ -93,16 +91,10 @@ data CommonSetupFlags = CommonSetupFlags
   -- after the @cabal repl@ command exits.
   }
   deriving (Eq, Show, Read, Generic)
+  deriving (Semigroup, Monoid) via Generically CommonSetupFlags
 
 instance Binary CommonSetupFlags
 instance Structured CommonSetupFlags
-
-instance Semigroup CommonSetupFlags where
-  (<>) = gmappend
-
-instance Monoid CommonSetupFlags where
-  mempty = gmempty
-  mappend = (<>)
 
 defaultCommonSetupFlags :: CommonSetupFlags
 defaultCommonSetupFlags =
@@ -142,8 +134,7 @@ commonSetupOptions showOrParseArgs =
   , option
       ""
       ["keep-temp-files"]
-      ( "Keep temporary files."
-      )
+      "Keep temporary files."
       setupKeepTempFiles
       (\keepTempFiles flags -> flags{setupKeepTempFiles = keepTempFiles})
       trueArg
@@ -246,7 +237,7 @@ programDbPaths' mkName progDb showOrParseArgs get set =
       option
         ""
         [mkName prog]
-        ("give the path to " ++ prog)
+        ("Give the path to " ++ prog)
         get
         set
         ( reqArg'
@@ -276,7 +267,7 @@ programDbOption progDb showOrParseArgs get set =
       option
         ""
         [prog ++ "-option"]
-        ( "give an extra option to "
+        ( "Give an extra option to "
             ++ prog
             ++ " (passed directly to "
             ++ prog
@@ -317,7 +308,7 @@ programDbOptions progDb showOrParseArgs get set =
       option
         ""
         [prog ++ "-options"]
-        ( "give extra options to "
+        ( "Give extra options to "
             ++ prog
             ++ " (split on spaces, use \"\" to prevent splitting)"
         )
@@ -409,7 +400,7 @@ optionVerbosity get set =
     ( optArg
         "n"
         (fmap Flag flagToVerbosity)
-        (show verbose, Flag verbose) -- default Value if no n is given
+        (Flag verbose)
         (fmap (Just . showForCabal) . flagToList)
     )
 
@@ -427,7 +418,7 @@ optionNumJobs get set =
     ( optArg
         "NUM"
         (fmap Flag numJobsParser)
-        ("$ncpus", Flag Nothing)
+        (Flag Nothing)
         (map (Just . maybe "$ncpus" show) . flagToList)
     )
   where

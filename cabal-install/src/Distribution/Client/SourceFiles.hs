@@ -12,6 +12,7 @@
 -- we cannot "see" easily.
 module Distribution.Client.SourceFiles (needElaboratedConfiguredPackage) where
 
+import Control.Monad ((>=>))
 import Control.Monad.IO.Class
 
 import Distribution.Client.ProjectPlanning.Types
@@ -81,7 +82,9 @@ needComponent pkg_descr comp =
     CBench bench -> needBenchmark pkg_descr bench
 
 needSetup :: Rebuild ()
-needSetup = findFirstFileMonitored id ["Setup.hs", "Setup.lhs"] >> return ()
+needSetup = do
+  void $ findFirstFileMonitored id ["Setup.hs", "Setup.lhs"]
+  void $ findFirstFileMonitored id ["SetupHooks.hs", "SetupHooks.lhs"]
 
 needLibrary :: PackageDescription -> Library -> Rebuild ()
 needLibrary
@@ -188,9 +191,11 @@ needBuildInfo pkg_descr bi modules = do
       , map getSymbolicPath $ asmSources bi
       , map getSymbolicPath expandedExtraSrcFiles
       ]
-  for_ (fmap getSymbolicPath $ installIncludes bi) $ \f ->
-    findFileMonitored ("." : fmap getSymbolicPath (includeDirs bi)) f
-      >>= maybe (return ()) need
+  for_
+    (getSymbolicPath <$> installIncludes bi)
+    ( findFileMonitored ("." : fmap getSymbolicPath (includeDirs bi))
+        >=> maybe (return ()) need
+    )
   where
     findNeededModules :: [Suffix] -> Rebuild ()
     findNeededModules exts =

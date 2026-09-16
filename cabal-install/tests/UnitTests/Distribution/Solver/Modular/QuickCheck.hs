@@ -1,5 +1,3 @@
-{-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE StandaloneDeriving #-}
 {-# OPTIONS_GHC -Wno-orphans #-}
 
 module UnitTests.Distribution.Solver.Modular.QuickCheck (tests) where
@@ -43,6 +41,7 @@ import Distribution.Solver.Types.Variable
 import Distribution.Verbosity
 import Distribution.Version
 
+import Distribution.Simple.Utils (ordNub)
 import UnitTests.Distribution.Solver.Modular.DSL
 import UnitTests.Distribution.Solver.Modular.QuickCheck.Utils
   ( ArbitraryOrd (..)
@@ -79,7 +78,7 @@ tests =
                 (ReorderGoals False)
                 (CountConflicts True)
                 indepGoals
-                (PreferOldest False)
+                PreferInstalledOrLatest
                 (getBlind <$> goalOrder)
             targets = testTargets test
             targets2 = case targetOrder of
@@ -100,7 +99,7 @@ tests =
                 reorderGoals
                 (CountConflicts True)
                 indep
-                (PreferOldest False)
+                PreferInstalledOrLatest
                 Nothing
          in counterexample (showResults r1 r2) $
               noneReachedBackjumpLimit [r1, r2] ==>
@@ -116,7 +115,7 @@ tests =
                 reorderGoals
                 (CountConflicts True)
                 indepGoals
-                (PreferOldest False)
+                PreferInstalledOrLatest
                 Nothing
          in counterexample (showResults r1 r2) $
               noneReachedBackjumpLimit [r1, r2] ==>
@@ -132,15 +131,15 @@ tests =
                 reorderGoals
                 (CountConflicts True)
                 indepGoals
-                (PreferOldest False)
+                PreferInstalledOrLatest
                 Nothing
          in counterexample (showResults r1 r2) $
               noneReachedBackjumpLimit [r1, r2] ==>
                 isRight (resultPlan r1) === isRight (resultPlan r2)
-  , testPropertyWithSeed "prefer oldest does not affect solvability" $
-      \test reorderGoals indepGoals ->
-        let r1 = solve' (PreferOldest True) test
-            r2 = solve' (PreferOldest False) test
+  , testPropertyWithSeed "PreferVersion does not affect solvability" $
+      \test reorderGoals indepGoals preferVersion ->
+        let r1 = solve' preferVersion test
+            r2 = solve' PreferInstalledOrLatest test
             solve' prefOldest =
               solve
                 (EnableBackjumping True)
@@ -173,7 +172,7 @@ tests =
                 reorderGoals
                 (CountConflicts False)
                 indepGoals
-                (PreferOldest False)
+                PreferInstalledOrLatest
                 Nothing
          in counterexample (showResults r1 r2) $
               noneReachedBackjumpLimit [r1, r2] ==>
@@ -190,7 +189,7 @@ tests =
                 reorderGoals
                 (CountConflicts False)
                 indepGoals
-                (PreferOldest False)
+                PreferInstalledOrLatest
                 Nothing
          in counterexample (showResults r1 r2) $
               noneReachedBackjumpLimit [r1, r2] ==>
@@ -231,7 +230,7 @@ solve
   -> ReorderGoals
   -> CountConflicts
   -> IndependentGoals
-  -> PreferOldest
+  -> PreferVersion
   -> Maybe VarOrdering
   -> SolverTest
   -> Result
@@ -343,8 +342,8 @@ instance Show SolverTest where
 instance Arbitrary SolverTest where
   arbitrary = do
     db <- arbitrary
-    let pkgVersions = nub $ map (getName &&& getVersion) (unTestDb db)
-        pkgs = nub $ map fst pkgVersions
+    let pkgVersions = ordNub $ map (getName &&& getVersion) (unTestDb db)
+        pkgs = ordNub $ map fst pkgVersions
     Positive n <- arbitrary
     targets <- randomSubset n pkgs
     constraints <- case pkgVersions of
@@ -532,10 +531,13 @@ instance Arbitrary IndependentGoals where
 
   shrink (IndependentGoals indep) = [IndependentGoals False | indep]
 
-instance Arbitrary PreferOldest where
-  arbitrary = PreferOldest <$> arbitrary
-
-  shrink (PreferOldest prefOldest) = [PreferOldest False | prefOldest]
+instance Arbitrary PreferVersion where
+  arbitrary =
+    oneof
+      [ pure PreferOldest
+      , pure PreferLatest
+      , pure PreferInstalledOrLatest
+      ]
 
 instance Arbitrary Component where
   arbitrary =
@@ -558,7 +560,7 @@ instance Arbitrary Component where
 -- internal libraries.
 arbitraryUQN :: Gen UnqualComponentName
 arbitraryUQN =
-  mkUnqualComponentName <$> (\c -> "component-" ++ [c]) <$> elements "ABC"
+  mkUnqualComponentName . (\c -> "component-" ++ [c]) <$> elements "ABC"
 
 instance Arbitrary ExampleInstalled where
   arbitrary = error "arbitrary not implemented: ExampleInstalled"

@@ -1,3 +1,5 @@
+{-# LANGUAGE LambdaCase #-}
+
 -- |
 -- Module      :  Distribution.PackageDescription.Check.Target
 -- Copyright   :  Lennart Kolmodin 2008, Francesco Ariis 2023
@@ -557,8 +559,8 @@ checkBuildInfoFeatures bi sv = do
 checkBuildInfoExtensions :: Monad m => BuildInfo -> CheckM m ()
 checkBuildInfoExtensions bi = do
   let exts = allExtensions bi
-      extCabal1_2 = nub $ filter (`elem` compatExtensionsExtra) exts
-      extCabal1_4 = nub $ filter (`notElem` compatExtensions) exts
+      extCabal1_2 = ordNub $ filter (`elem` compatExtensionsExtra) exts
+      extCabal1_4 = ordNub $ filter (`notElem` compatExtensions) exts
   -- As of Cabal-1.4 we can add new extensions without worrying
   -- about breaking old versions of cabal.
   checkSpecVer
@@ -953,7 +955,7 @@ checkGHCOptions title t opts = do
         )
         (PackageDistInexcusable . DynamicUnneeded)
       checkFlagsP
-        ( \opt -> case opt of
+        ( \case
             "-j" -> True
             ('-' : 'j' : d : _) -> isDigit d
             _ -> False

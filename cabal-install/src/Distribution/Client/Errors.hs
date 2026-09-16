@@ -1,10 +1,3 @@
-{-# LANGUAGE ConstraintKinds #-}
-{-# LANGUAGE FlexibleInstances #-}
-{-# LANGUAGE InstanceSigs #-}
-{-# OPTIONS_GHC -Wno-incomplete-uni-patterns #-}
-
------------------------------------------------------------------------------
-
 -- Module      :  Distribution.Client.Errors
 -- Copyright   :  Suganya Arun
 -- License     :  BSD3
@@ -415,7 +408,7 @@ exceptionMessageCabalInstall e = case e of
       ++ msg
       ++ "The package index or index cache is probably "
       ++ "corrupt. Running cabal update might fix it."
-  ReadIndexCache paths -> show (paths)
+  ReadIndexCache paths -> show paths
   ConfigStateFileException err -> err
   UploadAction -> "the 'upload' command expects at least one .tar.gz archive."
   UploadActionDocumentation ->
@@ -712,22 +705,19 @@ exceptionMessageCabalInstall e = case e of
                   | (thing, _got, alts@(_ : _)) <- nosuch'
                   ]
           ]
-      | let groupByContainer =
-              map
-                ( \g@((inside, _, _, _) : _) ->
-                    ( inside
-                    , [ (thing, got, alts)
-                      | (_, thing, got, alts) <- g
-                      ]
-                    )
-                )
-                . groupBy ((==) `on` (\(x, _, _, _) -> x))
-                . sortBy (compare `on` (\(x, _, _, _) -> x))
-      , (target, nosuch) <- targets
+      | (target, nosuch) <- targets
       ]
     where
       mungeThing "file" = "file target"
       mungeThing thing = thing
+      groupByContainer xs =
+        [ ( inside
+          , [ (thing, got, alts)
+            | (_, thing, got, alts) <- g
+            ]
+          )
+        | g@((inside, _, _, _) : _) <- groupBy ((==) `on` (\(x, _, _, _) -> x)) $ sortBy (compare `on` (\(x, _, _, _) -> x)) xs
+        ]
   TargetSelectorAmbiguousErr targets ->
     unlines
       [ "Ambiguous target '"

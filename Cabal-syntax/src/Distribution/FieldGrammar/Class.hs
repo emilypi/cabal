@@ -1,7 +1,5 @@
-{-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE FunctionalDependencies #-}
-{-# LANGUAGE RankNTypes #-}
-{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE QuantifiedConstraints #-}
 {-# LANGUAGE UndecidableSuperClasses #-}
 
 module Distribution.FieldGrammar.Class
@@ -13,24 +11,23 @@ module Distribution.FieldGrammar.Class
   , defaultFreeTextFieldDefST
   ) where
 
+import Data.Coerce (Coercible)
+import Data.Kind (Constraint, Type)
 import Distribution.Compat.Lens
 import Distribution.Compat.Prelude
 import Prelude ()
 
 import Distribution.CabalSpecVersion (CabalSpecVersion)
-import Distribution.Compat.Newtype (Newtype)
 import Distribution.FieldGrammar.Newtypes
 import Distribution.Fields.Field
 import Distribution.Utils.ShortText
 
--- | 'FieldGrammar' is parametrised by
+-- | @g@ is parametrised by
 --
 -- * @s@ which is a structure we are parsing. We need this to provide prettyprinter
 -- functionality
 --
 -- * @a@ type of the field.
---
--- /Note:/ We'd like to have @forall s. Applicative (f s)@ context.
 class
   ( c SpecVersion
   , c TestedWith
@@ -38,8 +35,9 @@ class
   , c Token
   , c Token'
   , c FilePathNT
+  , forall s. Applicative (g s)
   ) =>
-  FieldGrammar c g
+  FieldGrammar (c :: Type -> Constraint) (g :: Type -> Type -> Type)
     | g -> c
   where
   -- | Unfocus, zoom out, /blur/ 'FieldGrammar'.
@@ -47,11 +45,10 @@ class
 
   -- | Field which should be defined, exactly once.
   uniqueFieldAla
-    :: (c b, Newtype a b)
+    :: (c b, Coercible a b)
     => FieldName
     -- ^ field name
-    -> (a -> b)
-    -- ^ 'Newtype' pack
+    -> proxy a b
     -> ALens' s a
     -- ^ lens into the field
     -> g s a
@@ -68,22 +65,20 @@ class
 
   -- | Optional field.
   optionalFieldAla
-    :: (c b, Newtype a b)
+    :: (c b, Coercible a b)
     => FieldName
     -- ^ field name
-    -> (a -> b)
-    -- ^ 'pack'
+    -> proxy a b
     -> ALens' s (Maybe a)
     -- ^ lens into the field
     -> g s (Maybe a)
 
   -- | Optional field with default value.
   optionalFieldDefAla
-    :: (c b, Newtype a b, Eq a)
+    :: (c b, Coercible a b, Eq a)
     => FieldName
     -- ^ field name
-    -> (a -> b)
-    -- ^ 'Newtype' pack
+    -> proxy a b
     -> ALens' s a
     -- ^ @'Lens'' s a@: lens into the field
     -> a
@@ -119,15 +114,14 @@ class
 
   -- | Monoidal field.
   --
-  -- Values are combined with 'mappend'.
+  -- Values are combined with '(<>)'.
   --
   -- /Note:/ 'optionalFieldAla' is a @monoidalField@ with 'Last' monoid.
   monoidalFieldAla
-    :: (c b, Monoid a, Newtype a b)
+    :: (c b, Monoid a, Coercible a b)
     => FieldName
     -- ^ field name
-    -> (a -> b)
-    -- ^ 'pack'
+    -> proxy a b
     -> ALens' s a
     -- ^ lens into the field
     -> g s a
@@ -209,7 +203,7 @@ optionalField fn l = optionalFieldAla fn Identity l
 
 -- | Optional field with default value.
 optionalFieldDef
-  :: (FieldGrammar c g, Functor (g s), c (Identity a), Eq a)
+  :: (FieldGrammar c g, c (Identity a), Eq a)
   => FieldName
   -- ^ field name
   -> ALens' s a
@@ -219,7 +213,7 @@ optionalFieldDef
   -> g s a
 optionalFieldDef fn l x = optionalFieldDefAla fn Identity l x
 
--- | Field which can be define multiple times, and the results are @mappend@ed.
+-- | Field which can be define multiple times, and the results are combined with '(<>)'.
 monoidalField
   :: (FieldGrammar c g, c (Identity a), Monoid a)
   => FieldName
@@ -231,7 +225,7 @@ monoidalField fn l = monoidalFieldAla fn Identity l
 
 -- | Default implementation for 'freeTextFieldDefST'.
 defaultFreeTextFieldDefST
-  :: (Functor (g s), FieldGrammar c g)
+  :: FieldGrammar c g
   => FieldName
   -> ALens' s ShortText
   -- ^ lens into the field

@@ -1,10 +1,8 @@
 {-# LANGUAGE DataKinds #-}
-{-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE DerivingVia #-}
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE MultiWayIf #-}
-{-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE RecordWildCards #-}
-{-# LANGUAGE ScopedTypeVariables #-}
 
 module Distribution.Simple.Program.GHC
   ( GhcOptions (..)
@@ -150,6 +148,9 @@ normaliseGhcArgs (Just ghcVersion) PackageDescription{..} ghcArgs
         makeFilter :: String -> String -> Maybe (First ([String] -> [String]))
         makeFilter flag arg = First . filterRest <$> stripPrefix flag arg
           where
+            -- Drop the next argument, whether it comes after a `=` or
+            -- is stand-alone.
+            filterRest :: String -> [String] -> [String]
             filterRest leftOver = case dropEq leftOver of
               [] -> drop 1
               _ -> id
@@ -163,15 +164,24 @@ normaliseGhcArgs (Just ghcVersion) PackageDescription{..} ghcArgs
           Just f -> go (f args)
           Nothing -> arg : go args
 
+    -- Options that take parameters and do not modify the generated artifacts
+    -- are filtered out.
     argumentFilters :: [String] -> [String]
     argumentFilters =
       flagArgumentFilter
-        ["-ghci-script", "-H", "-interactive-print"]
+        [ "-ghci-script"
+        , "-H"
+        , "-interactive-print"
+        , "-fghci-browser-assets-dir"
+        ]
 
     -- \| Remove RTS arguments from a list.
     filterRtsArgs :: [String] -> [String]
     filterRtsArgs = snd . splitRTSArgs
 
+    -- Simple options (i.e. that do not take parameters, or just
+    -- take int parameters) which do *not* change generated artifacts
+    -- are filtered out.
     simpleFilters :: String -> Bool
     simpleFilters =
       not
@@ -182,7 +192,8 @@ normaliseGhcArgs (Just ghcVersion) PackageDescription{..} ghcArgs
           , Any . isPrefixOf "-dsuppress-"
           , Any . isPrefixOf "-dno-suppress-"
           , flagIn $ invertibleFlagSet "-" ["ignore-dot-ghci"]
-          , flagIn . invertibleFlagSet "-f" . mconcat $
+          , -- -f-something -f-no-something options.
+            flagIn . invertibleFlagSet "-f" . mconcat $
               [
                 [ "reverse-errors"
                 , "warn-unused-binds"
@@ -518,7 +529,9 @@ data GhcOptions = GhcOptions
   , ghcOptFfiIncludes :: NubListR FilePath
   -- ^ Extra header files to include for old-style FFI; the @ghc -#include@ flag.
   , ghcOptCcProgram :: Flag FilePath
-  -- ^ Program to use for the C and C++ compiler; the @ghc -pgmc@ flag.
+  -- ^ Program to use for the C compiler; the @ghc -pgmc@ flag.
+  , ghcOptGppProgram :: Flag FilePath
+  -- ^ Program to use for the C++ compiler; the @ghc -pgmcxx@ flag.
   , ----------------------------
     -- Language and extensions
 
@@ -592,6 +605,7 @@ data GhcOptions = GhcOptions
   -- Modifies some of the GHC error messages.
   }
   deriving (Show, Generic)
+  deriving (Semigroup, Monoid) via Generically GhcOptions
 
 data GhcMode
   = -- | @ghc -c@
@@ -796,18 +810,12 @@ renderGhcOptions comp _platform@(Platform _arch os) opts
               | not (flagBool ghcOptProfilingMode) ->
                   []
             Nothing -> []
-            Just GhcProfAutoAll
-              | flagProfAuto implInfo -> ["-fprof-auto"]
-              | otherwise -> ["-auto-all"] -- not the same, but close
+            Just GhcProfAutoAll -> ["-fprof-auto"]
             Just GhcProfLate
               | flagProfLate implInfo -> ["-fprof-late"]
               | otherwise -> ["-fprof-auto-top"] -- not the same, not very close, but what we have.
-            Just GhcProfAutoToplevel
-              | flagProfAuto implInfo -> ["-fprof-auto-top"]
-              | otherwise -> ["-auto-all"]
-            Just GhcProfAutoExported
-              | flagProfAuto implInfo -> ["-fprof-auto-exported"]
-              | otherwise -> ["-auto"]
+            Just GhcProfAutoToplevel -> ["-fprof-auto-top"]
+            Just GhcProfAutoExported -> ["-fprof-auto-exported"]
         , ["-split-sections" | flagBool ghcOptSplitSections]
         , case compilerCompatVersion GHC comp of
             -- the -split-objs flag was removed in GHC 9.8
@@ -873,12 +881,14 @@ renderGhcOptions comp _platform@(Platform _arch os) opts
             ]
         , ["-optc" ++ opt | opt <- ghcOptCcOptions opts]
         , -- C++ compiler options: GHC >= 8.10 requires -optcxx, older requires -optc
+          -- https://gitlab.haskell.org/ghc/ghc/-/issues/16477
           let cxxflag = case compilerCompatVersion GHC comp of
                 Just v | v >= mkVersion [8, 10] -> "-optcxx"
                 _ -> "-optc"
            in [cxxflag ++ opt | opt <- ghcOptCxxOptions opts]
         , ["-opta" ++ opt | opt <- ghcOptAsmOptions opts]
         , concat [["-pgmc", cc] | cc <- flag ghcOptCcProgram]
+        , concat [["-pgmcxx", cxx] | cxx <- flag ghcOptGppProgram]
         , -----------------
           -- Linker stuff
 
@@ -938,7 +948,7 @@ renderGhcOptions comp _platform@(Platform _arch os) opts
         , ["-hide-all-packages" | flagBool ghcOptHideAllPackages]
         , ["-Wmissing-home-modules" | flagBool ghcOptWarnMissingHomeModules]
         , ["-no-auto-link-packages" | flagBool ghcOptNoAutoLinkPackages]
-        , packageDbArgs implInfo (interpretPackageDBStack Nothing (ghcOptPackageDBs opts))
+        , packageDbArgsDb (interpretPackageDBStack Nothing (ghcOptPackageDBs opts))
         , concat $
             let space "" = ""
                 space xs = ' ' : xs
@@ -948,9 +958,7 @@ renderGhcOptions comp _platform@(Platform _arch os) opts
         , ----------------------------
           -- Language and extensions
 
-          if supportsHaskell2010 implInfo
-            then ["-X" ++ prettyShow lang | lang <- flag ghcOptLanguage]
-            else []
+          ["-X" ++ prettyShow lang | lang <- flag ghcOptLanguage]
         , [ ext'
           | ext <- flags ghcOptExtensions
           , ext' <- case Map.lookup ext (ghcOptExtensionMap opts) of
@@ -965,7 +973,9 @@ renderGhcOptions comp _platform@(Platform _arch os) opts
         , ----------------
           -- GHCi
 
-          concat [["-ghci-script", script] | flagGhciScript implInfo, script <- ghcOptGHCiScripts opts]
+          concat
+            [ ["-ghci-script", script] | script <- ghcOptGHCiScripts opts
+            ]
         , ---------------
           -- Inputs
 
@@ -999,27 +1009,9 @@ verbosityOpts verbosity
   | verbosity >= Normal = []
   | otherwise = ["-w", "-v0"]
 
--- | GHC <7.6 uses '-package-conf' instead of '-package-db'.
-packageDbArgsConf :: PackageDBStackCWD -> [String]
-packageDbArgsConf dbstack = case dbstack of
-  (GlobalPackageDB : UserPackageDB : dbs) -> concatMap specific dbs
-  (GlobalPackageDB : dbs) ->
-    ("-no-user-package-conf")
-      : concatMap specific dbs
-  _ -> ierror
-  where
-    specific (SpecificPackageDB db) = ["-package-conf", db]
-    specific _ = ierror
-    ierror =
-      error $
-        "internal error: unexpected package db stack: "
-          ++ show dbstack
-
--- | GHC >= 7.6 uses the '-package-db' flag. See
--- https://gitlab.haskell.org/ghc/ghc/-/issues/5977.
 packageDbArgsDb :: PackageDBStackCWD -> [String]
 -- special cases to make arguments prettier in common scenarios
-packageDbArgsDb dbstack = case dbstack of
+packageDbArgsDb = \case
   (GlobalPackageDB : UserPackageDB : dbs)
     | all isSpecific dbs -> concatMap single dbs
   (GlobalPackageDB : dbs)
@@ -1035,11 +1027,6 @@ packageDbArgsDb dbstack = case dbstack of
     single UserPackageDB = ["-user-package-db"]
     isSpecific (SpecificPackageDB _) = True
     isSpecific _ = False
-
-packageDbArgs :: GhcImplInfo -> PackageDBStackCWD -> [String]
-packageDbArgs implInfo
-  | flagPackageConf implInfo = packageDbArgsConf
-  | otherwise = packageDbArgsDb
 
 -- | Split a list of command-line arguments into RTS arguments and non-RTS
 -- arguments.
@@ -1060,13 +1047,3 @@ splitRTSArgs args =
               then addRTSArg arg $ go isRTSArg rest
               else addNonRTSArg arg $ go isRTSArg rest
    in go False args
-
--- -----------------------------------------------------------------------------
--- Boilerplate Monoid instance for GhcOptions
-
-instance Monoid GhcOptions where
-  mempty = gmempty
-  mappend = (<>)
-
-instance Semigroup GhcOptions where
-  (<>) = gmappend

@@ -36,6 +36,12 @@ tests =
       "Simple dependencies"
       [ runTest $ mkTest db1 "alreadyInstalled" ["A"] (solverSuccess [])
       , runTest $ mkTest db1 "installLatest" ["B"] (solverSuccess [("B", 2)])
+      , -- NB: we cannot try to install A directly here, since a directly selected will always pick the latest version
+        -- and ignores the default behaviour of preferring the installed version.
+        runTest $ mkTest dbLatest "preferInstalledOverLatest" ["B"] (solverSuccess [("B", 1)])
+      , runTest $
+          preferLatest $
+            mkTest dbLatest "installLatestOverInstalled" ["B"] (solverSuccess [("A", 2), ("B", 1)])
       , runTest $
           preferOldest $
             mkTest db1 "installOldest" ["B"] (solverSuccess [("B", 1)])
@@ -201,7 +207,7 @@ tests =
       "Non-reinstallable base, template-haskell and ghc (GHC without wiredInUnitIds)"
       [ runTest $
           mkTest dbBase "Refuse to install base without --allow-boot-library-installs" ["base"] $
-            solverFailure (isInfixOf "rejecting: base-1 (constraint from non-reinstallable package requires installed instance)")
+            solverFailure (isInfixOf "rejecting: base-5 (constraint from non-reinstallable package requires installed instance)")
       , runTest $
           mkTest dbTH "Refuse to install template-haskell without --allow-boot-library-installs" ["template-haskell"] $
             solverFailure (isInfixOf "rejecting: template-haskell-1 (constraint from non-reinstallable package requires installed instance)")
@@ -211,18 +217,25 @@ tests =
       , runTest $
           allowBootLibInstalls $
             mkTest dbBase "Install base with --allow-boot-library-installs" ["base"] $
-              solverSuccess [("base", 1), ("ghc-prim", 1), ("integer-gmp", 1), ("integer-simple", 1)]
+              solverSuccess [("base", 5), ("ghc-prim", 1), ("integer-gmp", 1), ("integer-simple", 1)]
+      , -- The base >= 4.22 constraint only makes sense alongside the wired-in
+        -- unit id constraints. A compiler that reports none has no installed
+        -- base satisfying it, so it must not be added here.
+        runTest $
+          allowBootLibInstalls $
+            mkTest dbBaseOld "Install old base with --allow-boot-library-installs" ["base"] $
+              solverSuccess [("base", 1)]
       ]
   , testGroup
       "Reinstallable base, template-haskell, but not ghc{,-internal} (GHC with wiredInUnitIds)"
       [ runTest $
           wiredInUnitIds $
             mkTest dbBase "Allows reinstalling base even without --allow-boot-library-installs" ["base"] $
-              solverSuccess [("base", 1), ("ghc-prim", 1), ("integer-gmp", 1), ("integer-simple", 1)]
+              solverSuccess [("base", 5), ("ghc-prim", 1), ("integer-gmp", 1), ("integer-simple", 1)]
       , runTest $
           wiredInUnitIds $
             mkTest dbTH "Allows reinstalling template-haskell even without --allow-boot-library-installs" ["template-haskell"] $
-              solverSuccess [("base", 1), ("ghc-prim", 1), ("pretty", 1), ("template-haskell", 1)]
+              solverSuccess [("base", 5), ("ghc-prim", 1), ("pretty", 1), ("template-haskell", 1)]
       , runTest $
           wiredInUnitIds $
             mkTest dbGhcInternal "Fails to reinstall ghc-internal as its wired-in" ["ghc-internal"] $
@@ -231,34 +244,122 @@ tests =
           wiredInUnitIds $
             mkTest dbNonupgrade "Refuse to install newer ghc requested by another library" ["A"] $
               solverFailure (isInfixOf "rejecting: ghc-2 (constraint from non-reinstallable package requires installed instance with unit id ghc-1)")
+      , runTest $
+          wiredInUnitIds $
+            mkTest dbBaseOld "Refuse to install very old base" ["base"] $
+              solverFailure (isInfixOf "rejecting: base-1 (constraint from non-reinstallable package requires >=4.22)")
       ]
-  , testGroup
+  , -- reject-unconstrained-dependencies=all requires all non-goals to be
+    -- version constrained. Goals don't need constraints and flag constraints
+    -- are not enough.
+    testGroup
       "reject-unconstrained"
-      [ runTest $
-          onlyConstrained $
-            mkTest db12 "missing syb" ["E"] $
-              solverFailure (isInfixOf "not a user-provided goal")
-      , runTest $
-          onlyConstrained $
-            mkTest db12 "all goals" ["E", "syb"] $
-              solverSuccess [("E", 1), ("syb", 2)]
-      , runTest $
-          onlyConstrained $
-            mkTest db17 "backtracking" ["A", "B"] $
-              solverSuccess [("A", 2), ("B", 1)]
-      , runTest $
-          onlyConstrained $
-            mkTest db17 "failure message" ["A"] $
-              solverFailure $
-                isInfixOf $
-                  "Could not resolve dependencies:\n"
-                    ++ "[__0] trying: A-3 (user goal)\n"
-                    ++ "[__1] next goal: C (dependency of A)\n"
-                    ++ "[__1] fail (not a user-provided goal nor mentioned as a constraint, "
-                    ++ "but reject-unconstrained-dependencies was set)\n"
-                    ++ "[__1] fail (backjumping, conflict set: A, C)\n"
-                    ++ "After searching the rest of the dependency tree exhaustively, "
-                    ++ "these were the goals I've had most trouble fulfilling: A, C, B"
+      [ testGroup
+          "[A, B]"
+          [ runTest $
+              onlyConstrained $
+                mkTest db17 "accept backtracking finds all goals closed set" ["A", "B"] $
+                  solverSuccess [("A", 2), ("B", 1)]
+          , runTest $
+              constraints [ExVersionConstraint (ScopeAnyQualifier "B") (V.thisVersion (V.mkVersion [1]))] $
+                onlyConstrained $
+                  mkTest db17 "accept non-goal 'B' version-constrained" ["A"] $
+                    solverSuccess [("A", 2), ("B", 1)]
+          , runTest $
+              constraints [ExFlagConstraint (ScopeAnyQualifier "B") "flag" False] $
+                onlyConstrained $
+                  mkTest db17 "reject non-goal 'B' flag-constrained" ["A", "C"] $
+                    solverFailure $
+                      isInfixOf
+                        "Could not resolve dependencies:\n\
+                        \[__0] trying: C-1 (user goal)\n\
+                        \[__1] next goal: B (dependency of C)\n\
+                        \[__1] fail (not a user-provided goal nor mentioned as a constraint when reject-unconstrained-dependencies=all)\n\
+                        \[__1] fail (backjumping, conflict set: B, C)\n\
+                        \After searching the rest of the dependency tree exhaustively, these were the goals I've had most trouble fulfilling: C, B"
+          , runTest $
+              onlyConstrained $
+                mkTest db17 "reject non-goal 'C' unconstrained" ["A"] $
+                  solverFailure $
+                    isInfixOf
+                      "Could not resolve dependencies:\n\
+                      \[__0] trying: A-3 (user goal)\n\
+                      \[__1] next goal: C (dependency of A)\n\
+                      \[__1] fail (not a user-provided goal nor mentioned as a constraint when reject-unconstrained-dependencies=all)\n\
+                      \[__1] fail (backjumping, conflict set: A, C)\n\
+                      \After searching the rest of the dependency tree exhaustively, these were the goals I've had most trouble fulfilling: A, C, B"
+          ]
+      , testGroup
+          "[base, syb, E]"
+          [ runTest $
+              onlyConstrained $
+                mkTest db12 "accept all goals, no other dependencies" ["base", "E", "syb"] $
+                  solverSuccess [("E", 1), ("syb", 2)]
+          , runTest $
+              constraints [ExVersionConstraint (ScopeAnyQualifier "base") (V.thisVersion (V.mkVersion [4]))] $
+                onlyConstrained $
+                  mkTest db12 "accept non-goal 'base' version-constrained" ["E", "syb"] $
+                    solverSuccess [("E", 1), ("syb", 2)]
+          , runTest $
+              constraints [ExVersionConstraint (ScopeAnyQualifier "syb") (V.thisVersion (V.mkVersion [2]))] $
+                onlyConstrained $
+                  mkTest db12 "accept non-goal 'syb' version-constrained" ["base", "E"] $
+                    solverSuccess [("E", 1), ("syb", 2)]
+          , runTest
+              $ constraints
+                [ ExVersionConstraint (ScopeAnyQualifier "base") (V.thisVersion (V.mkVersion [4]))
+                , ExVersionConstraint (ScopeAnyQualifier "syb") (V.thisVersion (V.mkVersion [2]))
+                ]
+              $ onlyConstrained
+              $ mkTest db12 "accept non-goals 'base' and 'syb' version-unconstrained" ["E"]
+              $ solverSuccess [("E", 1), ("syb", 2)]
+          , runTest $
+              onlyConstrained $
+                mkTest db12 "reject non-goal 'base' unconstrained" ["E", "syb"] $
+                  solverFailure $
+                    isInfixOf
+                      "Could not resolve dependencies:\n\
+                      \[__0] trying: E-1 (user goal)\n\
+                      \[__1] next goal: E.base (dependency of E)\n\
+                      \[__1] fail (not a user-provided goal nor mentioned as a constraint when reject-unconstrained-dependencies=all)\n\
+                      \[__1] fail (backjumping, conflict set: E, E.base)\n\
+                      \After searching the rest of the dependency tree exhaustively, these were the goals I've had most trouble fulfilling: E, E.base"
+          , runTest $
+              onlyConstrained $
+                mkTest db12 "reject non-goal 'syb' unconstrained" ["base", "E"] $
+                  solverFailure $
+                    isInfixOf
+                      "Could not resolve dependencies:\n\
+                      \[__0] trying: E-1 (user goal)\n\
+                      \[__1] next goal: syb (dependency of E)\n\
+                      \[__1] fail (not a user-provided goal nor mentioned as a constraint when reject-unconstrained-dependencies=all)\n\
+                      \[__1] fail (backjumping, conflict set: E, syb)\n\
+                      \After searching the rest of the dependency tree exhaustively, these were the goals I've had most trouble fulfilling: E, syb"
+          , runTest $
+              constraints [ExFlagConstraint (ScopeAnyQualifier "base") "flag" True] $
+                onlyConstrained $
+                  mkTest db12 "reject non-goal 'base' only flag-constrained" ["E", "syb"] $
+                    solverFailure $
+                      isInfixOf
+                        "Could not resolve dependencies:\n\
+                        \[__0] trying: E-1 (user goal)\n\
+                        \[__1] next goal: E.base (dependency of E)\n\
+                        \[__1] fail (not a user-provided goal nor mentioned as a constraint when reject-unconstrained-dependencies=all)\n\
+                        \[__1] fail (backjumping, conflict set: E, E.base)\n\
+                        \After searching the rest of the dependency tree exhaustively, these were the goals I've had most trouble fulfilling: E, E.base"
+          , runTest $
+              constraints [ExStanzaConstraint (ScopeAnyQualifier "base") [TestStanzas]] $
+                onlyConstrained $
+                  mkTest db12 "reject non-goal 'base' only stanza-constrained" ["E", "syb"] $
+                    solverFailure $
+                      isInfixOf
+                        "Could not resolve dependencies:\n\
+                        \[__0] trying: E-1 (user goal)\n\
+                        \[__1] next goal: E.base (dependency of E)\n\
+                        \[__1] fail (not a user-provided goal nor mentioned as a constraint when reject-unconstrained-dependencies=all)\n\
+                        \[__1] fail (backjumping, conflict set: E, E.base)\n\
+                        \After searching the rest of the dependency tree exhaustively, these were the goals I've had most trouble fulfilling: E, E.base"
+          ]
       ]
   , testGroup
       "Cycles"
@@ -1010,6 +1111,14 @@ db1 =
       , Right $ exAv "Z" 1 []
       ]
 
+-- db for testing PreferLatest
+dbLatest :: ExampleDb
+dbLatest =
+  [ Left $ exInst "A" 1 "A-1" []
+  , Right $ exAv "A" 2 []
+  , Right $ exAv "B" 1 [ExAny "A"]
+  ]
+
 -- In this example, we _can_ install C and D as independent goals, but we have
 -- to pick two different versions for B (arbitrarily)
 db2 :: ExampleDb
@@ -1405,12 +1514,15 @@ db11s2 =
             `withSetupDeps` [ExFix "base" 3]
       ]
 
+dbBaseOld :: ExampleDb
+dbBaseOld = [Right $ exAv "base" 1 []]
+
 dbBase :: ExampleDb
 dbBase =
   [ Right $
       exAv
         "base"
-        1
+        5
         [ExAny "ghc-prim", ExAny "integer-simple", ExAny "integer-gmp"]
   , Right $ exAv "ghc-prim" 1 []
   , Right $ exAv "integer-simple" 1 []
@@ -1435,7 +1547,7 @@ dbTH =
       , Left $ exInst "ghc-internal" 1 "ghc-internal-1" []
       , Left $ exInst "ghc-boot-th" 1 "ghc-boot-th-1" []
       , Right $ exAv "pretty" 1 [boundedBase]
-      , Right $ exAv "base" 1 [ExAny "ghc-prim", ExAny "ghc-internal"]
+      , Right $ exAv "base" 5 [ExAny "ghc-prim", ExAny "ghc-internal"]
       ]
 
 dbGhcInternal :: ExampleDb

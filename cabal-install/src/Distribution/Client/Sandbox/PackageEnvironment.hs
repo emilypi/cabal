@@ -1,10 +1,4 @@
-{-# LANGUAGE DataKinds #-}
-{-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE TupleSections #-}
-
------------------------------------------------------------------------------
-
------------------------------------------------------------------------------
+{-# LANGUAGE DerivingVia #-}
 
 -- |
 -- Module      :  Distribution.Client.Sandbox.PackageEnvironment
@@ -82,13 +76,7 @@ data PackageEnvironment = PackageEnvironment
   { pkgEnvSavedConfig :: SavedConfig
   }
   deriving (Generic)
-
-instance Monoid PackageEnvironment where
-  mempty = gmempty
-  mappend = (<>)
-
-instance Semigroup PackageEnvironment where
-  (<>) = gmappend
+  deriving (Semigroup, Monoid) via Generically PackageEnvironment
 
 -- | Optional package environment file that can be used to customize the default
 -- settings. Created by the user.
@@ -164,8 +152,7 @@ userPackageEnvironment verbosity pkgEnvDir globalConfigLocation = do
 -- | Same as @userPackageEnvironmentFile@, but returns a SavedConfig.
 loadUserConfig :: Verbosity -> FilePath -> Maybe FilePath -> IO SavedConfig
 loadUserConfig verbosity pkgEnvDir globalConfigLocation =
-  fmap pkgEnvSavedConfig $
-    userPackageEnvironment verbosity pkgEnvDir globalConfigLocation
+  pkgEnvSavedConfig <$> userPackageEnvironment verbosity pkgEnvDir globalConfigLocation
 
 -- | Descriptions of all fields in the package environment file.
 pkgEnvFieldDescrs :: ConstraintSource -> [FieldDescr PackageEnvironment]
@@ -346,7 +333,7 @@ showPackageEnvironment pkgEnv = showPackageEnvironmentWithComments Nothing pkgEn
 -- | Pretty-print the package environment with default values for empty fields
 -- commented out (just like the default Cabal config file).
 showPackageEnvironmentWithComments
-  :: (Maybe PackageEnvironment)
+  :: Maybe PackageEnvironment
   -> PackageEnvironment
   -> String
 showPackageEnvironmentWithComments mdefPkgEnv pkgEnv =

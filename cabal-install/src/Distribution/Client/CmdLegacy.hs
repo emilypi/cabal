@@ -1,7 +1,6 @@
-{-# LANGUAGE DataKinds #-}
-{-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
+{-# OPTIONS_GHC -Wno-redundant-constraints #-}
 
 module Distribution.Client.CmdLegacy (legacyCmd, legacyWrapperCmd, newCmd) where
 
@@ -14,7 +13,8 @@ import Distribution.Client.Sandbox
   )
 import qualified Distribution.Client.Setup as Client
 import Distribution.Client.SetupWrapper
-  ( SetupScriptOptions (..)
+  ( SetupRunnerArgs (NotInLibrary)
+  , SetupScriptOptions (..)
   , defaultSetupScriptOptions
   , setupWrapper
   )
@@ -38,7 +38,7 @@ import qualified Data.Text as T
 -- Tweaked versions of code from Main.
 regularCmd :: HasVerbosity flags => CommandUI flags -> (flags -> [String] -> globals -> IO action) -> CommandSpec (globals -> IO action)
 regularCmd ui action =
-  CommandSpec ui ((flip commandAddAction) (\flags extra globals -> action flags extra globals)) NormalCommand
+  CommandSpec ui (`commandAddAction` (\flags extra globals -> action flags extra globals)) NormalCommand
 
 wrapperCmd
   :: Monoid flags
@@ -46,7 +46,7 @@ wrapperCmd
   -> (flags -> Setup.CommonSetupFlags)
   -> CommandSpec (Client.GlobalFlags -> IO ())
 wrapperCmd ui getCommonFlags =
-  CommandSpec ui (\ui' -> wrapperAction ui' getCommonFlags) NormalCommand
+  CommandSpec ui (`wrapperAction` getCommonFlags) NormalCommand
 
 wrapperAction
   :: Monoid flags
@@ -84,6 +84,7 @@ wrapperAction command getCommonFlags =
         getCommonFlags
         (const (return flags))
         (const extraArgs)
+        NotInLibrary
 
 --
 

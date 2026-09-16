@@ -6,7 +6,9 @@ In order, the following will be built:
 Configuring test suite 'Test' for MainIsTest-0.1...
 Preprocessing test suite 'Test' for MainIsTest-0.1...
 Building test suite 'Test' for MainIsTest-0.1...
+Error: [Cabal-7125]
+Failed to build MainIsTest-0.1-inplace-Test. The exception was:
+  -----BEGIN CABAL OUTPUT-----
 Error: [Cabal-2115]
 MyDummy.hs doesn't exist
-Error: [Cabal-7125]
-Failed to build MainIsTest-0.1-inplace-Test.
+CallStack (from HasCallStack): <SNIPPED>

@@ -1,8 +1,7 @@
 {-# LANGUAGE DataKinds #-}
-{-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE DerivingVia #-}
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE PatternSynonyms #-}
-{-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ViewPatterns #-}
 
 -- |
@@ -55,6 +54,7 @@ data CopyFlags = CopyFlags
   , copyDest :: Flag CopyDest
   }
   deriving (Show, Generic)
+  deriving (Semigroup, Monoid) via Generically CopyFlags
 
 pattern CopyCommonFlags
   :: Flag VerbosityFlags
@@ -117,7 +117,7 @@ copyCommand =
           , "COMPONENTS [FLAGS]"
           ]
     , commandDefaultFlags = defaultCopyFlags
-    , commandOptions = \showOrParseArgs -> case showOrParseArgs of
+    , commandOptions = \case
         ShowArgs ->
           filter
             ( (`notElem` ["target-package-db"])
@@ -145,7 +145,7 @@ copyOptions showOrParseArgs =
         ( reqArg
             "DIR"
             (succeedReadE (Flag . CopyTo))
-            (\f -> case f of Flag (CopyTo p) -> [p]; _ -> [])
+            (\case Flag (CopyTo p) -> [p]; _ -> [])
         )
     , option
         ""
@@ -160,16 +160,9 @@ copyOptions showOrParseArgs =
         ( reqArg
             "DATABASE"
             (succeedReadE (Flag . CopyToDb))
-            (\f -> case f of Flag (CopyToDb p) -> [p]; _ -> [])
+            (\case Flag (CopyToDb p) -> [p]; _ -> [])
         )
     ]
 
 emptyCopyFlags :: CopyFlags
 emptyCopyFlags = mempty
-
-instance Monoid CopyFlags where
-  mempty = gmempty
-  mappend = (<>)
-
-instance Semigroup CopyFlags where
-  (<>) = gmappend

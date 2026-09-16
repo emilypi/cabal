@@ -1,9 +1,6 @@
-{-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE RecordWildCards #-}
-{-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE TypeApplications #-}
 
 -- | cabal-install CLI command: repl
 module Distribution.Client.CmdRepl
@@ -249,7 +246,7 @@ replCommand =
           ++ pname
           ++ " v2-repl --build-depends lens\n"
           ++ "    add the latest version of the library 'lens' to the default component "
-          ++ "(or no componentif there is no project present)\n"
+          ++ "(or no component if there is no project present)\n"
           ++ "  "
           ++ pname
           ++ " v2-repl --build-depends \"lens >= 4.15 && < 4.18\"\n"
@@ -360,7 +357,7 @@ resolveGlobalTarget flags@NixStyleFlags{extraFlags = ReplFlags{..}} targetString
       sourcePackage =
         fakeProjectSourcePackage projectRoot
           & ( (lSrcpkgDescription . L.condLibrary)
-                ?~ (CondNode library [])
+                ?~ CondNode library []
             )
       library = emptyLibrary{libBuildInfo = lBuildInfo}
       lBuildInfo =
@@ -522,7 +519,7 @@ targetedRepl
         -- into the multi-out directory.
         replOpts'' <- case targetCtx of
           ProjectContext -> return $ replOpts'{replOptionsFlagOutput = Flag dir}
-          _ -> usingGhciScript compiler projectRoot replOpts'
+          _ -> usingGhciScript projectRoot replOpts'
 
         let buildCtx' = buildCtx & lElaboratedShared . lPkgConfigReplOptions .~ replOpts''
         printPlan verbosity baseCtx'' buildCtx'
@@ -551,7 +548,7 @@ targetedRepl
         -- Find what the unit files are, and start a repl based on all the response
         -- files which have been created in the directory.
         -- unit files for components
-        unit_files <- (filter (/= "paths")) <$> listDirectory dir
+        unit_files <- filter (/= "paths") <$> listDirectory dir
 
         -- Order the unit files so that the find target becomes the active unit
         let active_unit_fp :: Maybe FilePath
@@ -591,7 +588,7 @@ targetedRepl
         -- single target repl
         replOpts'' <- case targetCtx of
           ProjectContext -> return replOpts'
-          _ -> usingGhciScript compiler projectRoot replOpts'
+          _ -> usingGhciScript projectRoot replOpts'
 
         let buildCtx' = buildCtx & lElaboratedShared . lPkgConfigReplOptions .~ replOpts''
         printPlan verbosity baseCtx'' buildCtx'
@@ -761,20 +758,13 @@ generateReplFlags includeTransitive elaboratedPlan OriginalComponentInfo{..} = f
 -- so we need to tell ghci to change back to the correct directory.
 --
 -- The @-ghci-script@ flag is path to the ghci script responsible for changing to the
--- correct directory. Only works on GHC >= 7.6, though. 🙁
-usingGhciScript :: Compiler -> FilePath -> ReplOptions -> IO ReplOptions
-usingGhciScript compiler projectRoot replOpts
-  | compilerCompatVersion GHC compiler >= Just minGhciScriptVersion = do
-      let ghciScriptPath = projectRoot </> "setcwd.ghci"
-      cwd <- getCurrentDirectory
-      writeFile ghciScriptPath (":cd " ++ cwd)
-      return $ replOpts & lReplOptionsFlags %~ (("-ghci-script" ++ ghciScriptPath) :)
-  | otherwise = return replOpts
-
--- | First version of GHC where GHCi supported the flag we need.
--- https://downloads.haskell.org/~ghc/7.6.1/docs/html/users_guide/release-7-6-1.html
-minGhciScriptVersion :: Version
-minGhciScriptVersion = mkVersion [7, 6]
+-- correct directory.
+usingGhciScript :: FilePath -> ReplOptions -> IO ReplOptions
+usingGhciScript projectRoot replOpts = do
+  let ghciScriptPath = projectRoot </> "setcwd.ghci"
+  cwd <- getCurrentDirectory
+  writeFile ghciScriptPath (":cd " ++ cwd)
+  return $ replOpts & lReplOptionsFlags %~ (("-ghci-script" ++ ghciScriptPath) :)
 
 -- | This defines what a 'TargetSelector' means for the @repl@ command.
 -- It selects the 'AvailableTarget's that the 'TargetSelector' refers to,

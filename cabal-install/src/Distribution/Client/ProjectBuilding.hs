@@ -1,9 +1,5 @@
-{-# LANGUAGE BangPatterns #-}
-{-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE DataKinds #-}
-{-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE RecordWildCards #-}
-{-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE NoMonoLocalBinds #-}
 
@@ -57,7 +53,7 @@ import Distribution.Client.GlobalFlags (RepoContext)
 import Distribution.Client.InstallPlan
   ( GenericInstallPlan
   , GenericPlanPackage
-  , IsUnit
+  , IsGraph
   )
 import qualified Distribution.Client.InstallPlan as InstallPlan
 import Distribution.Client.JobControl
@@ -87,10 +83,13 @@ import qualified Data.Set as Set
 
 import qualified Text.PrettyPrint as Disp
 
+import Control.Concurrent.STM (TVar, newTVarIO)
 import Control.Exception (assert, handle)
+import qualified Distribution.Client.IndexUtils as IndexUtils
+import Distribution.Simple.PackageIndex (InstalledPackageIndex)
 import System.Directory (doesDirectoryExist, doesFileExist, renameDirectory)
-import System.FilePath (makeRelative, normalise, takeDirectory, (<.>), (</>))
-import System.Semaphore (SemaphoreName (..))
+import System.FilePath (makeRelative, normalise, takeDirectory, takeFileName, (<.>), (</>))
+import System.Semaphore (SemaphoreIdentifier)
 
 import Distribution.Client.Errors
 import Distribution.Simple.Flag (fromFlagOrDefault)
@@ -260,20 +259,20 @@ rebuildTargetsDryRun distDirLayout@DistDirLayout{..} shared =
 -- dependencies. This can be used to propagate information from dependencies.
 foldMInstallPlanDepOrder
   :: forall m ipkg srcpkg b
-   . (Monad m, IsUnit ipkg, IsUnit srcpkg)
+   . (Monad m, IsGraph ipkg srcpkg)
   => ( GenericPlanPackage ipkg srcpkg
        -> [b]
        -> m b
      )
   -> GenericInstallPlan ipkg srcpkg
-  -> m (Map UnitId b)
+  -> m (Map (Key ipkg) b)
 foldMInstallPlanDepOrder visit =
   go Map.empty . InstallPlan.reverseTopologicalOrder
   where
     go
-      :: Map UnitId b
+      :: Map (Key ipkg) b
       -> [GenericPlanPackage ipkg srcpkg]
-      -> m (Map UnitId b)
+      -> m (Map (Key ipkg) b)
     go !results [] = return results
     go !results (pkg : pkgs) = do
       -- we go in the right order so the results map has entries for all deps
@@ -298,7 +297,7 @@ improveInstallPlanWithUpToDatePackages pkgsBuildStatus =
   where
     canPackageBeImproved :: ElaboratedConfiguredPackage -> Bool
     canPackageBeImproved pkg =
-      case Map.lookup (installedUnitId pkg) pkgsBuildStatus of
+      case Map.lookup (nodeKey pkg) pkgsBuildStatus of
         Just BuildStatusUpToDate{} -> True
         Just _ -> False
         Nothing ->
@@ -367,6 +366,19 @@ rebuildTargets
         createDirectoryIfMissingVerbose verbosity True distTempDirectory
         traverse_ (createPackageDBIfMissing verbosity compiler progdb) packageDBsToUse
 
+        -- Populate the running InstalledPackageIndex by doing a single
+        -- bulk read at startup. This allows us to obtain the
+        -- InstalledPackageInfo of every 'PreExisting' and 'Installed' unit
+        -- in the plan, regardless of how they ended up in the PackageDBs.
+        -- See (ProjIPI1) in Note [Per-project InstalledPackageIndex].
+        initialIPI <-
+          -- NB: 'getInstalledPackages' returns an error when there are no
+          -- PackageDBs, so we handle that case explicitly first.
+          if null packageDBsToUse
+            then return mempty
+            else IndexUtils.getInstalledPackages verbosity compiler packageDBsToUse progdb
+        ipiTVar <- newTVarIO initialIPI
+
         -- Concurrency control: create the job controller and concurrency limits
         -- for downloading, building and installing.
         withJobControl (newJobControlFromParStrat verbosity (Just compiler) buildSettingNumJobs Nothing) $ \jobControl -> do
@@ -387,8 +399,7 @@ rebuildTargets
                 $ \pkg ->
                   -- TODO: review exception handling
                   handle (\(e :: BuildFailure) -> return (Left e)) $ fmap Right $ do
-                    let uid = installedUnitId pkg
-                        pkgBuildStatus = Map.findWithDefault (error "rebuildTargets") uid pkgsBuildStatus
+                    let pkgBuildStatus = Map.findWithDefault (error "rebuildTargets") (nodeKey pkg) pkgsBuildStatus
 
                     rebuildTarget
                       verbosity
@@ -401,6 +412,7 @@ rebuildTargets
                       cacheLock
                       sharedPackageConfig
                       installPlan
+                      ipiTVar
                       pkg
                       pkgBuildStatus
     where
@@ -457,8 +469,35 @@ rebuildTargets
           isRemote (RemoteSourceRepoPackage _ _) = True
           isRemote _ = False
 
--- | Create a package DB if it does not currently exist. Note that this action
--- is /not/ safe to run concurrently.
+{- Note [Per-project InstalledPackageIndex]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+In cabal-install, we keep a running InstalledPackageIndex, used for the whole
+project, containing all registered units relevant to the project.
+
+We do this to avoid repeatedly querying @ghc-pkg@ on a per-package basis when
+configuring individual packages.
+
+  (ProjIPI1)
+    We initialise the index with a single @ghc-pkg dump@ invocation, which
+    queries all the package DBs that the plan touches. This single read
+    replaces the per-package query that 'computePackageInfo' would otherwise
+    perform.
+
+    This robustly handles the case of resuming an interrupted build.
+
+  (ProjIPI2)
+    During execution, each time we register a library, we insert its
+    InstalledPackageInfo into the index, so that subsequent packages that
+    depend on it have it available, without needing to re-query @ghc-pkg@.
+
+  (ProjIPI3)
+    Before configuring a package, we read the running InstalledPackageIndex
+    and pass it to Cabal's 'computePackageInfoFromIndex' instead of
+    'computePackageInfo', skipping the expensive per-package @ghc-pkg dump@
+    invocation.
+-}
+
+-- | Create a package DB if it does not currently exist.
 createPackageDBIfMissing
   :: Verbosity
   -> Compiler
@@ -470,24 +509,39 @@ createPackageDBIfMissing
   compiler
   progdb
   (SpecificPackageDB dbPath) = do
+    -- If it already exists, skip locking.
     exists <- Cabal.doesPackageDBExist dbPath
     unless exists $ do
       createDirectoryIfMissingVerbose verbosity True (takeDirectory dbPath)
-      Cabal.createPackageDB verbosity compiler progdb False dbPath
+      withPackageDBLock verbosity dbPath $ do
+        -- Re-check under the lock. Another process may have created the DB
+        -- while we were waiting.
+        exists' <- Cabal.doesPackageDBExist dbPath
+        unless exists' $
+          Cabal.createPackageDB verbosity compiler progdb dbPath
 createPackageDBIfMissing _ _ _ _ = return ()
+
+-- | Hold an exclusive cross-process lock while initialising a package DB.
+withPackageDBLock :: Verbosity -> FilePath -> IO a -> IO a
+withPackageDBLock verbosity dbPath =
+  withFileLock verbosity lockPath waitMsg
+  where
+    lockPath = takeDirectory dbPath </> ('.' : takeFileName dbPath) <.> "lock"
+    waitMsg = "Waiting for file lock on package database " ++ dbPath
 
 -- | Given all the context and resources, (re)build an individual package.
 rebuildTarget
   :: Verbosity
   -> DistDirLayout
   -> StoreDirLayout
-  -> Maybe SemaphoreName
+  -> Maybe SemaphoreIdentifier
   -> BuildTimeSettings
   -> AsyncFetchMap
   -> Lock
   -> Lock
   -> ElaboratedSharedConfig
   -> ElaboratedInstallPlan
+  -> TVar InstalledPackageIndex
   -> ElaboratedReadyPackage
   -> BuildStatus
   -> IO BuildResult
@@ -502,6 +556,7 @@ rebuildTarget
   cacheLock
   sharedPackageConfig
   plan
+  ipiTVar
   rpkg@(ReadyPackage pkg)
   pkgBuildStatus
     -- Technically, doing the --only-download filtering only in this function is
@@ -588,6 +643,7 @@ rebuildTarget
           sharedPackageConfig
           plan
           rpkg
+          ipiTVar
           srcdir
           builddir
 
@@ -604,6 +660,7 @@ rebuildTarget
           sharedPackageConfig
           plan
           rpkg
+          ipiTVar
           buildStatus
           srcdir
           builddir

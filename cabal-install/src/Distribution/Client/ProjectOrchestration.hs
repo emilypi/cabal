@@ -1,8 +1,6 @@
 {-# LANGUAGE CPP #-}
-{-# LANGUAGE NamedFieldPuns #-}
-{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE RecordWildCards #-}
-{-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE ViewPatterns #-}
 
 -- | This module deals with building and incrementally rebuilding a collection
@@ -308,7 +306,7 @@ establishProjectBaseContextWithRoot verbosity cliConfig projectRoot currentComma
 
   -- https://github.com/haskell/cabal/issues/6013
   -- https://github.com/haskell/cabal/issues/7401
-  let projPath = distProjectFileMain (distProjectFile distDirLayout)
+  let projPath = distProjectFile distDirLayout ProjectFileKeyMain
   when (null (projectPackages projectConfig) && null (projectPackagesOptional projectConfig)) $
     dieWithException verbosity (ProjectConfigNoPackages projPath)
 
@@ -457,8 +455,8 @@ runProjectBuildPhase
   verbosity
   ProjectBaseContext{..}
   ProjectBuildContext{..} =
-    fmap (Map.union (previousBuildOutcomes pkgsBuildStatus)) $
-      rebuildTargets
+    Map.union (previousBuildOutcomes pkgsBuildStatus)
+      <$> rebuildTargets
         verbosity
         projectConfig
         distDirLayout
@@ -470,7 +468,7 @@ runProjectBuildPhase
     where
       previousBuildOutcomes :: BuildStatusMap -> BuildOutcomes
       previousBuildOutcomes =
-        Map.mapMaybe $ \status -> case status of
+        Map.mapMaybe $ \case
           BuildStatusUpToDate buildSuccess -> Just (Right buildSuccess)
           -- TODO: [nice to have] record build failures persistently
           _ -> Nothing
@@ -597,7 +595,7 @@ resolveTargetsFromSolver
        -> Either (TargetProblem err) k
      )
   -> ElaboratedInstallPlan
-  -> Maybe (SourcePackageDb)
+  -> Maybe SourcePackageDb
   -> [TargetSelector]
   -> Either [TargetProblem err] TargetsMap
 resolveTargetsFromSolver selectPackageTargets selectComponentTarget installPlan sourceDb targetSelectors =
@@ -681,7 +679,7 @@ resolveTargets
        -> Either (TargetProblem err) k
      )
   -> AvailableTargetIndexes u
-  -> Maybe (SourcePackageDb)
+  -> Maybe SourcePackageDb
   -> [TargetSelector]
   -> Either [TargetProblem err] (TargetsMapX u)
 resolveTargets
@@ -706,15 +704,16 @@ resolveTargets
             , (uid, ct) <- cts
             ]
 
+      filterWholeComponentTargets mkfilter bt ats =
+        componentTargets WholeComponent
+          <$> selectPackageTargets bt (maybe id filterTargetsKind mkfilter ats)
+
       checkTarget :: TargetSelector -> Either (TargetProblem err) [(u, ComponentTarget)]
 
       -- We can ask to build any whole package, project-local or a dependency
       checkTarget bt@(TargetPackage _ (ordNub -> [pkgid]) mkfilter)
-        | Just ats <-
-            fmap (maybe id filterTargetsKind mkfilter) $
-              Map.lookup pkgid availableTargetsByPackageId =
-            fmap (componentTargets WholeComponent) $
-              selectPackageTargets bt ats
+        | Just ats <- Map.lookup pkgid availableTargetsByPackageId =
+            filterWholeComponentTargets mkfilter bt ats
         | otherwise =
             Left (TargetProblemNoSuchPackage pkgid)
       checkTarget (TargetPackage _ pkgids _) =
@@ -731,18 +730,14 @@ resolveTargets
       -- .cabal files for a single package?
 
       checkTarget bt@(TargetAllPackages mkfilter) =
-        fmap (componentTargets WholeComponent)
-          . selectPackageTargets bt
-          . maybe id filterTargetsKind mkfilter
-          . filter availableTargetLocalToProject
-          $ concat (Map.elems availableTargetsByPackageId)
+        filterWholeComponentTargets mkfilter bt $
+          concatMap (filter availableTargetLocalToProject) (Map.elems availableTargetsByPackageId)
       checkTarget (TargetComponent pkgid cname subtarget)
         | Just ats <-
             Map.lookup
               (pkgid, cname)
               availableTargetsByPackageIdAndComponentName =
-            fmap (componentTargets subtarget) $
-              selectComponentTargets subtarget ats
+            componentTargets subtarget <$> selectComponentTargets subtarget ats
         | Map.member pkgid availableTargetsByPackageId =
             Left (TargetProblemNoSuchComponent pkgid cname)
         | otherwise =
@@ -757,19 +752,14 @@ resolveTargets
               Map.lookup
                 (pkgname, cname)
                 availableTargetsByPackageNameAndComponentName =
-            fmap (componentTargets subtarget) $
-              selectComponentTargets subtarget ats
+            componentTargets subtarget <$> selectComponentTargets subtarget ats
         | Map.member pkgname availableTargetsByPackageName =
             Left (TargetProblemUnknownComponent pkgname ecname)
         | otherwise =
             Left (TargetNotInProject pkgname)
       checkTarget bt@(TargetPackageNamed pkgname mkfilter)
-        | Just ats <-
-            fmap (maybe id filterTargetsKind mkfilter) $
-              Map.lookup pkgname availableTargetsByPackageName =
-            fmap (componentTargets WholeComponent)
-              . selectPackageTargets bt
-              $ ats
+        | Just ats <- Map.lookup pkgname availableTargetsByPackageName =
+            filterWholeComponentTargets mkfilter bt ats
         | Just SourcePackageDb{packageIndex} <- mPkgDb
         , let pkg = lookupPackageName packageIndex pkgname
         , not (null pkg) =
@@ -782,7 +772,7 @@ resolveTargets
         -> [(b, ComponentName)]
         -> [(b, ComponentTarget)]
       componentTargets subtarget =
-        map (fmap (\cname -> ComponentTarget cname subtarget))
+        map (fmap (`ComponentTarget` subtarget))
 
       selectComponentTargets
         :: SubComponentTarget
@@ -1017,7 +1007,7 @@ selectBuildableTargetsWith' p =
   (fmap . map) forgetTargetDetail . unzip . zipBuildableTargetsWith p
 
 forgetTargetDetail :: AvailableTarget k -> AvailableTarget ()
-forgetTargetDetail = fmap (const ())
+forgetTargetDetail = void
 
 forgetTargetsDetail :: [AvailableTarget k] -> [AvailableTarget ()]
 forgetTargetsDetail = map forgetTargetDetail
@@ -1189,6 +1179,7 @@ printPlan
                 verbosity
                 Nothing -- omit working directory
                 (makeSymbolicPath "$builddir")
+                (setupHsConfigureArgs elab)
                 buildSettingKeepTempFiles
             fullConfigureFlags =
               runIdentity

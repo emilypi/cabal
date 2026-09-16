@@ -1,7 +1,3 @@
-{-# LANGUAGE DeriveGeneric #-}
-
------------------------------------------------------------------------------
-
 -- |
 -- Module      :  Distribution.Simple.Glob.Internal
 -- Copyright   :  Isaac Jones, Simon Marlow 2003-2004
@@ -31,6 +27,9 @@ data Glob
     GlobDir !GlobPieces !Glob
   | -- | @**/<glob>@, where @**@ denotes recursively traversing
     -- all directories and matching filenames on <glob>.
+    --
+    -- Note that the @<glob>@ portion can only match on filenames, not paths,
+    -- so for example @**/foo/*.txt@ is not supported.
     GlobDirRecursive !GlobPieces
   | -- | A file glob.
     GlobFile !GlobPieces
@@ -74,22 +73,26 @@ instance Pretty Glob where
 instance Parsec Glob where
   parsec = parsecPath
     where
-      parsecPath :: CabalParsing m => m Glob
-      parsecPath = do
-        glob <- parsecGlob
-        dirSep *> (GlobDir glob <$> parsecPath <|> pure (GlobDir glob GlobDirTrailing)) <|> pure (GlobFile glob)
-      -- We could support parsing recursive directory search syntax
-      -- @**@ here too, rather than just in 'parseFileGlob'
-
       dirSep :: CabalParsing m => m ()
       dirSep =
-        () <$ P.char '/'
+        void (P.char '/')
           <|> P.try
             ( do
                 _ <- P.char '\\'
                 -- check this isn't an escape code
                 P.notFollowedBy (P.satisfy isGlobEscapedChar)
             )
+
+      parsecPath :: CabalParsing m => m Glob
+      parsecPath =
+        P.choice
+          [ do
+              P.try (P.string "**" *> dirSep)
+              GlobDirRecursive <$> parsecGlob
+          , do
+              glob <- parsecGlob
+              dirSep *> (GlobDir glob <$> parsecPath <|> pure (GlobDir glob GlobDirTrailing)) <|> pure (GlobFile glob)
+          ]
 
       parsecGlob :: CabalParsing m => m GlobPieces
       parsecGlob = some parsecPiece

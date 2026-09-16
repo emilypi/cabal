@@ -12,3 +12,10 @@ package cabal-install
 
 package Cabal
   flags: +git-rev
+
+package semaphore-compat
+  flags: -build-testing
+
+if os(windows)
+  package zlib
+    flags: -pkg-config +bundled-c-zlib

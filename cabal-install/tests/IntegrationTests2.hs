@@ -1,8 +1,5 @@
-{-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE PatternSynonyms #-}
-{-# LANGUAGE RankNTypes #-}
-{-# LANGUAGE ScopedTypeVariables #-}
 -- For the handy instance IsString PackageIdentifier
 {-# OPTIONS_GHC -Wno-orphans #-}
 
@@ -138,7 +135,7 @@ silentTest = wrapTest silentHelper
           else res
 
 testCase :: String -> Assertion -> TestTree
-testCase desc action = (T.testCase desc action)
+testCase desc action = T.testCase desc action
 
 tests :: ProjectConfig -> [TestTree]
 tests config =
@@ -957,7 +954,7 @@ testTargetProblemsBuild config reportSubCase = do
       CmdBuild.selectPackageTargets
       CmdBuild.selectComponentTarget
       [mkTargetPackage "p-0.1"]
-      [ ("p-0.1-inplace", (CLibName LMainLibName))
+      [ ("p-0.1-inplace", CLibName LMainLibName)
       , ("p-0.1-inplace-a-benchmark", CBenchName "a-benchmark")
       , ("p-0.1-inplace-a-testsuite", CTestName "a-testsuite")
       , ("p-0.1-inplace-an-exe", CExeName "an-exe")
@@ -983,7 +980,7 @@ testTargetProblemsBuild config reportSubCase = do
       CmdBuild.selectPackageTargets
       CmdBuild.selectComponentTarget
       [mkTargetPackage "p-0.1"]
-      [ ("p-0.1-inplace", (CLibName LMainLibName))
+      [ ("p-0.1-inplace", CLibName LMainLibName)
       , ("p-0.1-inplace-an-exe", CExeName "an-exe")
       , ("p-0.1-inplace-libp", CFLibName "libp")
       ]
@@ -1158,7 +1155,7 @@ testTargetProblemsRepl config reportSubCase = do
       (CmdRepl.selectPackageTargets (CmdRepl.MultiReplDecision Nothing False))
       CmdRepl.selectComponentTarget
       [TargetPackage TargetExplicitNamed ["p-0.1"] Nothing]
-      [("p-0.1-inplace", (CLibName LMainLibName))]
+      [("p-0.1-inplace", CLibName LMainLibName)]
     -- When we select the package with an explicit filter then we get those
     -- components even though we did not explicitly enable tests/benchmarks
     assertProjectDistinctTargets
@@ -1480,7 +1477,7 @@ testTargetProblemsTest config reportSubCase = do
             [ (CTestName "a-testsuite", "TestModule")
             , (CBenchName "a-benchmark", "BenchModule")
             , (CExeName "an-exe", "ExeModule")
-            , ((CLibName LMainLibName), "P")
+            , (CLibName LMainLibName, "P")
             ]
          ]
       ++ [ ( const
@@ -1634,7 +1631,7 @@ testTargetProblemsBench config reportSubCase = do
             [ (CTestName "a-testsuite", "TestModule")
             , (CBenchName "a-benchmark", "BenchModule")
             , (CExeName "an-exe", "ExeModule")
-            , ((CLibName LMainLibName), "P")
+            , (CLibName LMainLibName, "P")
             ]
          ]
       ++ [ ( const
@@ -1711,7 +1708,7 @@ testTargetProblemsHaddock config reportSubCase = do
         (CmdHaddock.selectPackageTargets haddockFlags)
         CmdHaddock.selectComponentTarget
         [mkTargetPackage "p-0.1"]
-        [ ("p-0.1-inplace", (CLibName LMainLibName))
+        [ ("p-0.1-inplace", CLibName LMainLibName)
         , ("p-0.1-inplace-a-benchmark", CBenchName "a-benchmark")
         , ("p-0.1-inplace-a-testsuite", CTestName "a-testsuite")
         , ("p-0.1-inplace-an-exe", CExeName "an-exe")
@@ -1727,7 +1724,7 @@ testTargetProblemsHaddock config reportSubCase = do
         (CmdHaddock.selectPackageTargets haddockFlags)
         CmdHaddock.selectComponentTarget
         [mkTargetPackage "p-0.1"]
-        [("p-0.1-inplace", (CLibName LMainLibName))]
+        [("p-0.1-inplace", CLibName LMainLibName)]
 
   reportSubCase "requested component kinds"
   -- When we selecting the package with an explicit filter then it does not
@@ -1758,7 +1755,7 @@ testTargetProblemsHaddock config reportSubCase = do
 
 assertProjectDistinctTargets
   :: forall err
-   . (Eq err, Show err)
+   . Show err
   => ElaboratedInstallPlan
   -> (forall k. TargetSelector -> [AvailableTarget k] -> Either (TargetProblem err) [k])
   -> (forall k. SubComponentTarget -> AvailableTarget k -> Either (TargetProblem err) k)
@@ -1914,16 +1911,11 @@ testSetupScriptStyles config reportSubCase = do
 
   plan0@(_, _, sharedConfig) <- planProject testdir1 config
 
-  let isOSX (Platform _ OSX) = True
-      isOSX _ = False
-      compilerVer = compilerVersion (pkgConfigCompiler sharedConfig)
+  let compilerVer = compilerVersion (pkgConfigCompiler sharedConfig)
   -- Skip the Custom tests when the shipped Cabal library is buggy
-  unless
-    ( (isOSX (pkgConfigPlatform sharedConfig) && (compilerVer < mkVersion [7, 10]))
-        -- 9.10 ships Cabal 3.12.0.0 affected by #9940
-        || (mkVersion [9, 10] <= compilerVer && compilerVer < mkVersion [9, 11])
-    )
-    $ do
+  -- 9.10 ships Cabal 3.12.0.0 affected by #9940
+  unless (mkVersion [9, 10] <= compilerVer && compilerVer < mkVersion [9, 11]) $
+    do
       (plan1, res1) <- executePlan plan0
       pkg1 <- expectPackageInstalled plan1 res1 pkgidA
       elabSetupScriptStyle pkg1 @?= SetupCustomExplicitDeps
@@ -1975,7 +1967,7 @@ testBuildKeepGoing :: ProjectConfig -> Assertion
 testBuildKeepGoing config = do
   -- P is expected to fail, Q does not depend on P but without
   -- parallel build and without keep-going then we don't build Q yet.
-  (plan1, res1) <- executePlan =<< planProject testdir (config `mappend` keepGoing False)
+  (plan1, res1) <- executePlan =<< planProject testdir (config <> keepGoing False)
   (_, failure1) <- expectPackageFailed plan1 res1 "p-0.1"
   expectBuildFailed failure1
   _ <- expectPackageConfigured plan1 res1 "q-0.1"
@@ -1983,7 +1975,7 @@ testBuildKeepGoing config = do
   -- With keep-going then we should go on to successfully build Q
   (plan2, res2) <-
     executePlan
-      =<< planProject testdir (config `mappend` keepGoing True)
+      =<< planProject testdir (config <> keepGoing True)
   (_, failure2) <- expectPackageFailed plan2 res2 "p-0.1"
   expectBuildFailed failure2
   _ <- expectPackageInstalled plan2 res2 "q-0.1"
@@ -2023,7 +2015,7 @@ testRegressionIssue3324 config = when (buildOS /= Windows) $ do
   -- add the missing dep, now it should work
   let qcabal = basedir </> testdir </> "q" </> "q.cabal"
   withFileFinallyRestore qcabal $ do
-    tryFewTimes $ BS.appendFile qcabal ("  build-depends: p\n")
+    tryFewTimes $ BS.appendFile qcabal "  build-depends: p\n"
     (plan2, res2) <- executePlan =<< planProject testdir config
     _ <- expectPackageInstalled plan2 res2 "p-0.1"
     _ <- expectPackageInstalled plan2 res2 "q-0.1"
@@ -2099,7 +2091,7 @@ testProgramOptionsSpecific config0 = do
 
   assertEqual
     "q"
-    (Nothing)
+    Nothing
     (getProgArgs packages "q")
   assertEqual
     "p"
@@ -2130,9 +2122,21 @@ getProgArgs :: [ElaboratedConfiguredPackage] -> String -> Maybe [String]
 getProgArgs [] _ = Nothing
 getProgArgs (elab : pkgs) name
   | pkgName (elabPkgSourceId elab) == mkPackageName name =
-      Map.lookup "ghc" (elabProgramArgs elab)
+      removeHideAllPackages $ Map.lookup "ghc" (elabProgramArgs elab)
   | otherwise =
       getProgArgs pkgs name
+  where
+    removeHideAllPackages mbArgs =
+      -- Filter out "-hide-all-packages", as we pass that by default
+      -- to GHC invocations in order to avoid it picking up environment files.
+      -- See https://github.com/haskell/cabal/issues/4010
+      case filter (/= "-hide-all-packages") <$> mbArgs of
+        Just args'
+          | null args' ->
+              Nothing
+          | otherwise ->
+              Just args'
+        Nothing -> Nothing
 
 ---------------------------------
 -- Test utils to plan and build
@@ -2616,6 +2620,7 @@ testConfigOptionComments = do
   "-- minimize-conflict-set" `assertHasCommentLine` "minimize-conflict-set"
   "-- independent-goals" `assertHasCommentLine` "independent-goals"
   "-- prefer-oldest" `assertHasCommentLine` "prefer-oldest"
+  "-- prefer-version" `assertHasCommentLine` "prefer-version"
   "-- shadow-installed-packages" `assertHasCommentLine` "shadow-installed-packages"
   "-- strong-flags" `assertHasCommentLine` "strong-flags"
   "-- allow-boot-library-installs" `assertHasCommentLine` "allow-boot-library-installs"
@@ -2642,6 +2647,7 @@ testConfigOptionComments = do
   "-- install-method" `assertHasCommentLine` "install-method"
   "installdir" `assertHasLine` "installdir"
   "-- token" `assertHasCommentLine` "token"
+  "-- token-command" `assertHasCommentLine` "token-command"
   "-- username" `assertHasCommentLine` "username"
   "-- password" `assertHasCommentLine` "password"
   "-- password-command" `assertHasCommentLine` "password-command"

@@ -1,7 +1,5 @@
-{-# LANGUAGE DataKinds #-}
-{-# LANGUAGE NamedFieldPuns #-}
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE RecordWildCards #-}
-{-# LANGUAGE ScopedTypeVariables #-}
 
 module Distribution.Client.ProjectPlanOutput
   ( -- * Plan output
@@ -194,7 +192,7 @@ encodePlanAsJson distDirLayout elaboratedInstallPlan elaboratedSharedConfig =
                     J.object $
                       [ comp2str c
                         J..= J.object
-                          ( [ "depends" J..= map (jdisplay . confInstId) (map fst ldeps)
+                          ( [ "depends" J..= map ((jdisplay . confInstId) . fst) ldeps
                             , "exe-depends" J..= map (jdisplay . confInstId) edeps
                             ]
                               ++ bin_file c
@@ -207,7 +205,7 @@ encodePlanAsJson distDirLayout elaboratedInstallPlan elaboratedSharedConfig =
                       ]
                in ["components" J..= components]
             ElabComponent comp ->
-              [ "depends" J..= map (jdisplay . confInstId) (map fst $ elabLibDependencies elab)
+              [ "depends" J..= map ((jdisplay . confInstId) . fst) (elabLibDependencies elab)
               , "exe-depends" J..= map jdisplay (elabExeDependencies elab)
               , "component-name" J..= J.String (comp2str (compSolverName comp))
               ]
@@ -222,7 +220,7 @@ encodePlanAsJson distDirLayout elaboratedInstallPlan elaboratedSharedConfig =
         -- with an old lib:Cabal version.
         buildInfoFileLocation :: J.Pair
         buildInfoFileLocation
-          | elabSetupScriptCliVersion elab < mkVersion [3, 7, 0, 0] =
+          | setupCliVersion (elabSetupScriptCliVersion elab) < mkVersion [3, 7, 0, 0] =
               "build-info" J..= J.Null
           | otherwise =
               "build-info" J..= J.String (getSymbolicPath $ buildInfoPref $ makeSymbolicPath dist_dir)
@@ -315,7 +313,7 @@ encodePlanAsJson distDirLayout elaboratedInstallPlan elaboratedSharedConfig =
                 then dist_dir </> "build" </> prettyShow s </> prettyShow s <.> exeExtension plat
                 else InstallDirs.bindir (elabInstallDirs elab) </> prettyShow s <.> exeExtension plat
 
-        flib_file' :: (Pretty a, Show a) => a -> [J.Pair]
+        flib_file' :: Pretty a => a -> [J.Pair]
         flib_file' s =
           ["bin-file" J..= J.String bin]
           where
@@ -642,7 +640,7 @@ postBuildProjectStatus
           ]
 
       elabLibDeps :: ElaboratedConfiguredPackage -> [UnitId]
-      elabLibDeps = map (newSimpleUnitId . confInstId) . map fst . elabLibDependencies
+      elabLibDeps = map ((newSimpleUnitId . confInstId) . fst) . elabLibDependencies
 
       -- Was a build was attempted for this package?
       -- If it doesn't have both a build status and outcome then the answer is no.
@@ -667,27 +665,24 @@ postBuildProjectStatus
 
       packagesBuildLocal :: Set UnitId
       packagesBuildLocal =
-        selectPlanPackageIdSet $ \pkg ->
-          case pkg of
-            InstallPlan.PreExisting _ -> False
-            InstallPlan.Installed _ -> False
-            InstallPlan.Configured srcpkg -> elabLocalToProject srcpkg
+        selectPlanPackageIdSet $ \case
+          InstallPlan.PreExisting _ -> False
+          InstallPlan.Installed _ -> False
+          InstallPlan.Configured srcpkg -> elabLocalToProject srcpkg
 
       packagesBuildInplace :: Set UnitId
       packagesBuildInplace =
-        selectPlanPackageIdSet $ \pkg ->
-          case pkg of
-            InstallPlan.PreExisting _ -> False
-            InstallPlan.Installed _ -> False
-            InstallPlan.Configured srcpkg -> isInplaceBuildStyle (elabBuildStyle srcpkg)
+        selectPlanPackageIdSet $ \case
+          InstallPlan.PreExisting _ -> False
+          InstallPlan.Installed _ -> False
+          InstallPlan.Configured srcpkg -> isInplaceBuildStyle (elabBuildStyle srcpkg)
 
       packagesAlreadyInStore :: Set UnitId
       packagesAlreadyInStore =
-        selectPlanPackageIdSet $ \pkg ->
-          case pkg of
-            InstallPlan.PreExisting _ -> True
-            InstallPlan.Installed _ -> True
-            InstallPlan.Configured _ -> False
+        selectPlanPackageIdSet $ \case
+          InstallPlan.PreExisting _ -> True
+          InstallPlan.Installed _ -> True
+          InstallPlan.Configured _ -> False
 
       selectPlanPackageIdSet
         :: ( InstallPlan.GenericPlanPackage InstalledPackageInfo ElaboratedConfiguredPackage
@@ -781,8 +776,10 @@ readPackagesUpToDateCacheFile :: DistDirLayout -> IO PackagesUpToDate
 readPackagesUpToDateCacheFile DistDirLayout{distProjectCacheFile} =
   handleDoesNotExist Set.empty $
     handleDecodeFailure $
-      withBinaryFile (distProjectCacheFile "up-to-date") ReadMode $ \hnd ->
-        Binary.decodeOrFailIO =<< BS.hGetContents hnd
+      withBinaryFile
+        (distProjectCacheFile "up-to-date")
+        ReadMode
+        (Binary.decodeOrFailIO <=< BS.hGetContents)
   where
     handleDecodeFailure = fmap (fromRight Set.empty)
 
@@ -857,8 +854,8 @@ writePlanGhcEnvironment
     | compilerFlavor compiler == GHC
     , supportsPkgEnvFiles (getImplInfo compiler) =
         -- TODO: check ghcjs compat
-        fmap Just $
-          writeGhcEnvironmentFile
+        Just
+          <$> writeGhcEnvironmentFile
             path
             platform
             (compilerVersion compiler)

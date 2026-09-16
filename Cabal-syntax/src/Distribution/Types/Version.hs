@@ -1,6 +1,3 @@
-{-# LANGUAGE DeriveDataTypeable #-}
-{-# LANGUAGE DeriveGeneric #-}
-
 module Distribution.Types.Version
   ( -- * Package versions
     Version
@@ -99,7 +96,7 @@ instance Pretty Version where
       )
 
 instance Parsec Version where
-  parsec = mkVersion <$> toList <$> P.sepByNonEmpty versionDigitParser (P.char '.') <* tags
+  parsec = (mkVersion . toList <$> P.sepByNonEmpty versionDigitParser (P.char '.')) <* tags
     where
       tags = do
         ts <- many $ P.char '-' *> some (P.satisfy isAlphaNum)

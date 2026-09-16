@@ -1,6 +1,3 @@
-{-# LANGUAGE DeriveDataTypeable #-}
-{-# LANGUAGE DeriveGeneric #-}
-
 module Distribution.Types.Module
   ( Module (..)
   ) where
@@ -35,11 +32,7 @@ instance Pretty Module where
     pretty uid <<>> Disp.text ":" <<>> pretty mod_name
 
 instance Parsec Module where
-  parsec = do
-    uid <- parsec
-    _ <- P.char ':'
-    mod_name <- parsec
-    return (Module uid mod_name)
+  parsec = Module <$> parsec <* P.char ':' <*> parsec
 
 instance NFData Module where
   rnf (Module uid mod_name) = rnf uid `seq` rnf mod_name

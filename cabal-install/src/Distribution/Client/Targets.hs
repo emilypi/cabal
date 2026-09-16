@@ -1,7 +1,3 @@
-{-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE DeriveTraversable #-}
-{-# LANGUAGE ScopedTypeVariables #-}
-
 -- |
 -- Module      :  Distribution.Client.Targets
 -- Copyright   :  (c) Duncan Coutts 2011
@@ -82,6 +78,7 @@ import Distribution.PackageDescription
 import Distribution.Simple.Utils
   ( dieWithException
   , lowercase
+  , ordNub
   )
 import Distribution.Types.Flag
   ( parsecFlagAssignmentNonEmpty
@@ -164,10 +161,7 @@ data UserTarget
 
 readUserTargets :: Verbosity -> [String] -> IO [UserTarget]
 readUserTargets verbosity targetStrs = do
-  (problems, targets) <-
-    liftM
-      partitionEithers
-      (traverse readUserTarget targetStrs)
+  (problems, targets) <- partitionEithers <$> traverse readUserTarget targetStrs
   reportUserTargetProblems verbosity problems
   return targets
 
@@ -515,10 +509,7 @@ disambiguatePackageTargets availablePkgIndex availableExtra targets =
 
     -- use any extra specific available packages to help us disambiguate
     packageNameEnv :: PackageNameEnv
-    packageNameEnv =
-      mappend
-        (indexPackageNameEnv availablePkgIndex)
-        (extraPackageNameEnv availableExtra)
+    packageNameEnv = indexPackageNameEnv availablePkgIndex <> extraPackageNameEnv availableExtra
 
 -- | Report problems to the user. That is, if there are any problems
 -- then raise an exception.
@@ -559,7 +550,7 @@ disambiguatePackageName
   -> PackageName
   -> MaybeAmbiguous PackageName
 disambiguatePackageName (PackageNameEnv pkgNameLookup) name =
-  case nub (pkgNameLookup name) of
+  case ordNub (pkgNameLookup name) of
     [] -> None
     names -> case find (name ==) names of
       Just name' -> Unambiguous name'
@@ -569,7 +560,6 @@ newtype PackageNameEnv = PackageNameEnv (PackageName -> [PackageName])
 
 instance Monoid PackageNameEnv where
   mempty = PackageNameEnv (const [])
-  mappend = (<>)
 
 instance Semigroup PackageNameEnv where
   PackageNameEnv lookupA <> PackageNameEnv lookupB =

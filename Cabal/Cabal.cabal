@@ -1,7 +1,7 @@
-cabal-version: 3.6
+cabal-version: 3.8
 name:          Cabal
-version:       3.17.0.0
-copyright:     2003-2025, Cabal Development Team (see AUTHORS file)
+version:       3.19.0.0
+copyright:     2003-2026, Cabal Development Team (see AUTHORS file)
 license:       BSD-3-Clause
 license-file:  LICENSE
 author:        Cabal Development Team <cabal-devel@haskell.org>
@@ -35,22 +35,23 @@ flag git-rev
   manual: True
 
 library
-  default-language: Haskell2010
+  default-language: GHC2021
+  -- Disabling ImportQualifiedPost, otherwise fourmolu jumps ahead to apply it everywhere
+  default-extensions: NoImportQualifiedPost
   hs-source-dirs: src
 
   build-depends:
-    , Cabal-syntax ^>= 3.17
+    , Cabal-syntax ^>= 3.19
     , array      >= 0.4.0.1  && < 0.6
-    , base       >= 4.13     && < 5
+    , base       >= 4.17     && < 5
     , bytestring >= 0.10.8   && < 0.13
     , containers >= 0.5.8.2  && < 0.9
-    , deepseq    >= 1.3.0.1  && < 1.7
+    , deepseq    >= 1.4      && < 1.7
     , directory  >= 1.2.7    && < 1.4
     , filepath   >= 1.4.2    && < 1.6
     , pretty     >= 1.1.1    && < 1.2
-    -- segfaults on older macOS versions #11465
-    , process    >= 1.2.1.0  && < 1.6.24 || == 1.6.26.0 || >= 1.6.26.2 && < 1.7
-    , time       >= 1.4.0.1  && < 1.16
+    , process    >= 1.6.29.0 && < 1.7
+    , time       >= 1.4.0.1  && < 1.17
 
   if os(windows)
     build-depends:
@@ -103,7 +104,6 @@ library
     Distribution.Compat.Stack
     Distribution.Compat.SysInfo
     Distribution.Compat.Time
-    Distribution.Make
     Distribution.PackageDescription.Check
     Distribution.ReadE
     Distribution.Simple
@@ -165,6 +165,7 @@ library
     Distribution.Simple.UHC
     Distribution.Simple.UserHooks
     Distribution.Simple.SetupHooks.Errors
+    Distribution.Simple.SetupHooks.HooksMain
     Distribution.Simple.SetupHooks.Internal
     Distribution.Simple.SetupHooks.Rule
     Distribution.Simple.Utils
@@ -197,11 +198,9 @@ library
     Distribution.Compat.Exception,
     Distribution.Compat.Graph,
     Distribution.Compat.Lens,
-    Distribution.Compat.Newtype,
     Distribution.Compat.NonEmptySet,
     Distribution.Compat.Parsing,
     Distribution.Compat.Prelude,
-    Distribution.Compat.Semigroup,
     Distribution.Compiler,
     Distribution.FieldGrammar,
     Distribution.FieldGrammar.Class,

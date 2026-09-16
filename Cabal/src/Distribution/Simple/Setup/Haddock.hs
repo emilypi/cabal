@@ -1,8 +1,6 @@
 {-# LANGUAGE DataKinds #-}
-{-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE DerivingVia #-}
 {-# LANGUAGE PatternSynonyms #-}
-{-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ViewPatterns #-}
 
 -- |
@@ -114,6 +112,7 @@ data HaddockFlags = HaddockFlags
   , haddockUseUnicode :: Flag Bool
   }
   deriving (Show, Generic)
+  deriving (Semigroup, Monoid) via Generically HaddockFlags
 
 pattern HaddockCommonFlags
   :: Flag VerbosityFlags
@@ -357,7 +356,7 @@ haddockOptions showOrParseArgs =
     , option
         ""
         ["resources-dir"]
-        "location of Haddocks static / auxiliary files"
+        "Location of Haddocks static / auxiliary files"
         haddockResourcesDir
         (\v flags -> flags{haddockResourcesDir = v})
         (reqArgFlag "DIR")
@@ -379,13 +378,6 @@ haddockOptions showOrParseArgs =
 
 emptyHaddockFlags :: HaddockFlags
 emptyHaddockFlags = mempty
-
-instance Monoid HaddockFlags where
-  mempty = gmempty
-  mappend = (<>)
-
-instance Semigroup HaddockFlags where
-  (<>) = gmappend
 
 -- ------------------------------------------------------------
 
@@ -440,6 +432,7 @@ data HaddockProjectFlags = HaddockProjectFlags
   , haddockProjectUseUnicode :: Flag Bool
   }
   deriving (Show, Generic)
+  deriving (Semigroup, Monoid) via Generically HaddockProjectFlags
 
 defaultHaddockProjectFlags :: HaddockProjectFlags
 defaultHaddockProjectFlags =
@@ -616,7 +609,7 @@ haddockProjectOptions showOrParseArgs =
     , option
         ""
         ["resources-dir"]
-        "location of Haddocks static / auxiliary files"
+        "Location of Haddocks static / auxiliary files"
         haddockProjectResourcesDir
         (\v flags -> flags{haddockProjectResourcesDir = v})
         (reqArgFlag "DIR")
@@ -631,10 +624,3 @@ haddockProjectOptions showOrParseArgs =
 
 emptyHaddockProjectFlags :: HaddockProjectFlags
 emptyHaddockProjectFlags = mempty
-
-instance Monoid HaddockProjectFlags where
-  mempty = gmempty
-  mappend = (<>)
-
-instance Semigroup HaddockProjectFlags where
-  (<>) = gmappend

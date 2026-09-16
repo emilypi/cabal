@@ -1,6 +1,4 @@
 {-# LANGUAGE DataKinds #-}
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE RankNTypes #-}
 
 module Distribution.Simple.Test.LibV09
   ( runTest
@@ -158,13 +156,12 @@ runTest verbHandles pkg_descr lbi clbi hpcMarkupInfo flags suite = do
     -- Generate TestSuiteLog from executable exit code and a machine-
     -- readable test log
     suiteLog <-
-      fmap
-        ( \s ->
-            (\l -> l{logFile = finalLogName l})
-              . fromMaybe (error $ "panic! read @TestSuiteLog " ++ show s)
-              $ readMaybe s -- TODO: eradicateNoParse
+      ( \s ->
+          (\l -> l{logFile = finalLogName l})
+            . fromMaybe (error $ "panic! read @TestSuiteLog " ++ show s)
+            $ readMaybe s -- TODO: eradicateNoParse
         )
-        $ readFile tempLog
+        <$> readFile tempLog
 
     -- Write summary notice to log file indicating start of test suite
     appendFile (logFile suiteLog) $ summarizeSuiteStart testName'
@@ -322,7 +319,7 @@ stubRunTests tests = do
       return $ GroupLogs (groupName g) logs
     stubRunTests' (ExtraOptions _ t) = stubRunTests' t
     maybeDefaultOption opt =
-      maybe Nothing (\d -> Just (optionName opt, d)) $ optionDefault opt
+      (\d -> Just (optionName opt, d)) =<< optionDefault opt
     defaultOptions testInst = mapMaybe maybeDefaultOption $ options testInst
 
 -- | From a test stub, write the 'TestSuiteLog' to temporary file for the calling

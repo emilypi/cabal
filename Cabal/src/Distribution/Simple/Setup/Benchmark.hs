@@ -1,8 +1,6 @@
 {-# LANGUAGE DataKinds #-}
-{-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE DerivingVia #-}
 {-# LANGUAGE PatternSynonyms #-}
-{-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ViewPatterns #-}
 
 -- |
@@ -53,6 +51,7 @@ data BenchmarkFlags = BenchmarkFlags
   , benchmarkOptions :: [PathTemplate]
   }
   deriving (Show, Generic)
+  deriving (Semigroup, Monoid) via Generically BenchmarkFlags
 
 pattern BenchmarkCommonFlags
   :: Flag VerbosityFlags
@@ -117,7 +116,7 @@ benchmarkOptions' showOrParseArgs =
     [ option
         []
         ["benchmark-options"]
-        ( "give extra options to benchmark executables "
+        ( "Give extra options to benchmark executables "
             ++ "(split on spaces, use \"\" to prevent splitting; "
             ++ "name templates can use $pkgid, $compiler, "
             ++ "$os, $arch, $benchmark)"
@@ -132,7 +131,7 @@ benchmarkOptions' showOrParseArgs =
     , option
         []
         ["benchmark-option"]
-        ( "give extra option to benchmark executables "
+        ( "Give extra option to benchmark executables "
             ++ "(passed directly as a single argument; "
             ++ "name template can use $pkgid, $compiler, "
             ++ "$os, $arch, $benchmark)"
@@ -148,10 +147,3 @@ benchmarkOptions' showOrParseArgs =
 
 emptyBenchmarkFlags :: BenchmarkFlags
 emptyBenchmarkFlags = mempty
-
-instance Monoid BenchmarkFlags where
-  mempty = gmempty
-  mappend = (<>)
-
-instance Semigroup BenchmarkFlags where
-  (<>) = gmappend

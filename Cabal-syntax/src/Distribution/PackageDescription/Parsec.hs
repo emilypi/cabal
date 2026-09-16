@@ -1,7 +1,4 @@
-{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE Rank2Types #-}
-{-# LANGUAGE ScopedTypeVariables #-}
 
 -- |
 -- Module      :  Distribution.PackageDescription.Parsec
@@ -58,9 +55,9 @@ import Distribution.Version (Version, mkVersion, versionNumbers)
 
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BS8
+import Data.Coerce (coerce)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
-import qualified Distribution.Compat.Newtype as Newtype
 import qualified Distribution.Compat.NonEmptySet as NES
 import qualified Distribution.Types.BuildInfo.Lens as L
 import qualified Distribution.Types.Executable.Lens as L
@@ -133,7 +130,7 @@ data SectionS = SectionS
   }
 
 stateGpd :: Lens' SectionS GenericPackageDescription
-stateGpd f (SectionS gpd cs) = (\x -> SectionS x cs) <$> f gpd
+stateGpd f (SectionS gpd cs) = (`SectionS` cs) <$> f gpd
 {-# INLINE stateGpd #-}
 
 stateCommonStanzas :: Lens' SectionS (Map String CondTreeBuildInfo)
@@ -169,7 +166,7 @@ parseGenericPackageDescription' scannedVer lexWarnings utf8WarnPos fs = do
         -- version will be parsed twice, therefore we parse without warnings.
         v <-
           withoutWarnings $
-            Newtype.unpack' SpecVersion
+            coerce @SpecVersion @CabalSpecVersion
               <$>
               -- Use version with || and && but before addition of ^>= and removal of -any
               runFieldParser pos parsec CabalSpecV1_24 fls
@@ -656,7 +653,7 @@ processImports v fromBuildInfo commonStanzas = go []
     hasCommonStanzas = specHasCommonStanzas v
 
     getList' :: List CommaFSep Token String -> [String]
-    getList' = Newtype.unpack
+    getList' = coerce
 
     go acc (Field (Name pos name) _ : fields)
       | name == "import"
@@ -717,10 +714,10 @@ onAllBranches p = go mempty
     -- done. If not, then one of the conditional branches below the current node
     -- must satisfy it. Each node may have multiple immediate children; we only
     -- one need one to satisfy the property because the configure step uses
-    -- 'mappend' to join together the results of flag resolution.
+    -- '(<>)' to join together the results of flag resolution.
     go :: a -> CondTree v a -> Bool
     go acc ct =
-      let acc' = acc `mappend` condTreeData ct
+      let acc' = acc <> condTreeData ct
        in p acc' || any (goBranch acc') (condTreeComponents ct)
 
     -- Both the 'true' and the 'false' block must satisfy the property.

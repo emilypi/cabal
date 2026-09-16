@@ -1,10 +1,4 @@
-{-# LANGUAGE ExistentialQuantification #-}
-{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE RankNTypes #-}
-{-# LANGUAGE ScopedTypeVariables #-}
-
------------------------------------------------------------------------------
 
 -- |
 -- Module      :  Distribution.Simple.Command
@@ -79,7 +73,6 @@ module Distribution.Simple.Command
   , reqArg'
   , optArg
   , optArg'
-  , optArgDef'
   , noArg
   , boolOpt
   , boolOpt'
@@ -145,7 +138,7 @@ data OptDescr a
       OptFlags
       ArgPlaceHolder
       (ReadE (a -> a))
-      (String, a -> a)
+      (a -> a)
       (a -> [Maybe String])
   | ChoiceOpt [(Description, OptFlags, a -> a, a -> Bool)]
   | BoolOpt
@@ -158,7 +151,7 @@ data OptDescr a
 fmapOptDescr :: forall a b. (b -> a) -> (a -> (b -> b)) -> OptDescr a -> OptDescr b
 fmapOptDescr x u = \case
   ReqArg d o p upd get -> ReqArg d o p (fmap m upd) (get . x)
-  OptArg d o p upd (str, g) get -> OptArg d o p (fmap m upd) (str, m g) (get . x)
+  OptArg d o p upd g get -> OptArg d o p (fmap m upd) (m g) (get . x)
   ChoiceOpt opts -> ChoiceOpt $ fmap (\(d, o, upd, get) -> (d, o, m upd, get . x)) opts
   BoolOpt d true false upd get -> BoolOpt d true false (\b -> m $ upd b) (get . x)
   where
@@ -240,7 +233,7 @@ reqArg ad mkflag showflag sf lf d get set =
     d
     (sf, lf)
     ad
-    (fmap (\a b -> set (get b `mappend` a) b) mkflag)
+    (fmap (\a b -> set (get b <> a) b) mkflag)
     (showflag . get)
 
 -- | Create a string-valued command line interface with a default value.
@@ -248,16 +241,16 @@ optArg
   :: Monoid b
   => ArgPlaceHolder
   -> ReadE b
-  -> (String, b)
+  -> b
   -> (b -> [Maybe String])
   -> MkOptDescr (a -> b) (b -> a -> a) a
-optArg ad mkflag (dv, mkDef) showflag sf lf d get set =
+optArg ad mkflag mkDef showflag sf lf d get set =
   OptArg
     d
     (sf, lf)
     ad
-    (fmap (\a b -> set (get b `mappend` a) b) mkflag)
-    (dv, \b -> set (get b `mappend` mkDef) b)
+    (fmap (\a b -> set (get b <> a) b) mkflag)
+    (\b -> set (get b <> mkDef) b)
     (showflag . get)
 
 -- | (String -> a) variant of "reqArg"
@@ -278,16 +271,7 @@ optArg'
   -> (b -> [Maybe String])
   -> MkOptDescr (a -> b) (b -> a -> a) a
 optArg' ad mkflag showflag =
-  optArg ad (succeedReadE (mkflag . Just)) ("", mkflag Nothing) showflag
-
-optArgDef'
-  :: Monoid b
-  => ArgPlaceHolder
-  -> (String, Maybe String -> b)
-  -> (b -> [Maybe String])
-  -> MkOptDescr (a -> b) (b -> a -> a) a
-optArgDef' ad (dv, mkflag) showflag =
-  optArg ad (succeedReadE (mkflag . Just)) (dv, mkflag Nothing) showflag
+  optArg ad (succeedReadE (mkflag . Just)) (mkflag Nothing) showflag
 
 noArg :: Eq b => b -> MkOptDescr (a -> b) (b -> a -> a) a
 noArg flag sf lf d = choiceOpt [(flag, (sf, lf), d)] sf lf d
@@ -363,8 +347,8 @@ viewAsGetOpt (OptionField _n aa) = concatMap optDescrToGetOpt aa
   where
     optDescrToGetOpt (ReqArg d (cs, ss) arg_desc set _) =
       [GetOpt.Option cs ss (GetOpt.ReqArg (runReadE set) arg_desc) d]
-    optDescrToGetOpt (OptArg d (cs, ss) arg_desc set (dv, def) _) =
-      [GetOpt.Option cs ss (GetOpt.OptArg dv set' arg_desc) d]
+    optDescrToGetOpt (OptArg d (cs, ss) arg_desc set def _) =
+      [GetOpt.Option cs ss (GetOpt.OptArg set' arg_desc) d]
       where
         set' Nothing = Right def
         set' (Just txt) = runReadE set txt
@@ -395,16 +379,16 @@ liftOptionL l = liftOption (^# l) (l #~)
 liftOptDescr :: (b -> a) -> (a -> (b -> b)) -> OptDescr a -> OptDescr b
 liftOptDescr get' set' (ChoiceOpt opts) =
   ChoiceOpt
-    [ (d, ff, liftSet get' set' set, (get . get'))
+    [ (d, ff, liftSet get' set' set, get . get')
     | (d, ff, set, get) <- opts
     ]
-liftOptDescr get' set' (OptArg d ff ad set (dv, mkDef) get) =
+liftOptDescr get' set' (OptArg d ff ad set mkDef get) =
   OptArg
     d
     ff
     ad
     (liftSet get' set' `fmap` set)
-    (dv, liftSet get' set' mkDef)
+    (liftSet get' set' mkDef)
     (get . get')
 liftOptDescr get' set' (ReqArg d ff ad set get) =
   ReqArg d ff ad (liftSet get' set' `fmap` set) (get . get')
@@ -594,7 +578,7 @@ commandParseArgs command global args =
     unrecognised opts =
       [ "unrecognized "
         ++ "'"
-        ++ (commandName command)
+        ++ commandName command
         ++ "'"
         ++ " option `"
         ++ opt
@@ -720,7 +704,7 @@ commandsRunWithFallback globalCommand commands defaultCommand args =
         CommandList list -> pure $ CommandList (list ++ commandNames)
         CommandErrors _ -> pure $ CommandHelp globalHelp
         CommandReadyToGo (_, []) -> pure $ CommandHelp globalHelp
-        CommandReadyToGo (_, (name : cmdArgs')) ->
+        CommandReadyToGo (_, name : cmdArgs') ->
           case lookupCommand name of
             [Command _ _ action _] ->
               case action ("--help" : cmdArgs') of

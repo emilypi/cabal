@@ -1,6 +1,3 @@
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE RankNTypes #-}
-
 module Distribution.Simple.Test.ExeV10
   ( runTest
   ) where
@@ -20,6 +17,7 @@ import qualified Distribution.Simple.LocalBuildInfo as LBI
   , buildDir
   , depLibraryPaths
   )
+
 import Distribution.Simple.Program.Db
 import Distribution.Simple.Program.Find
 import Distribution.Simple.Program.Run
@@ -27,7 +25,7 @@ import Distribution.Simple.Setup.Common
 import Distribution.Simple.Setup.Test
 import Distribution.Simple.Test.Log
 import Distribution.Simple.Utils
-import Distribution.System
+import Distribution.System (Platform (Platform))
 import Distribution.TestSuite
 import qualified Distribution.Types.LocalBuildInfo as LBI
   ( LocalBuildInfo (..)
@@ -91,7 +89,7 @@ runTest verbHandles pkg_descr lbi clbi hpcMarkupInfo flags suite = do
         map
           (testOption pkg_descr lbi suite)
           (testOptions flags)
-      tixFile = packageRoot (testCommonFlags flags) </> getSymbolicPath (tixFilePath distPref way (testName'))
+      tixFile = packageRoot (testCommonFlags flags) </> getSymbolicPath (tixFilePath distPref way testName')
 
   shellEnv <-
     getFullEnvironment

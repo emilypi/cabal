@@ -1,4 +1,3 @@
-{-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE RecordWildCards #-}
 module Distribution.Solver.Modular.Dependency (
     -- * Variables
@@ -150,7 +149,7 @@ showDependencyReason (DependencyReason qpn flags stanzas) =
     unwords $
         showQPN qpn
       : map (uncurry showFlagValue) (M.toList flags)
-     ++ map (\s -> showSBool s True) (S.toList stanzas)
+     ++ map (`showSBool` True) (S.toList stanzas)
 
 -- | Options for goal qualification (used in 'qualifyDeps')
 --

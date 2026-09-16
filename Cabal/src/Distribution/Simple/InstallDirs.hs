@@ -1,12 +1,9 @@
+{-# LANGUAGE ApplicativeDo #-}
 {-# LANGUAGE CApiFFI #-}
 {-# LANGUAGE CPP #-}
-{-# LANGUAGE DeriveFunctor #-}
-{-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE DerivingVia #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE RankNTypes #-}
-
------------------------------------------------------------------------------
+{-# LANGUAGE RecordWildCards #-}
 
 -- |
 -- Module      :  Distribution.Simple.InstallDirs
@@ -78,7 +75,6 @@ import qualified Prelude
 import Foreign
 import Foreign.C
 #endif
-
 -- ---------------------------------------------------------------------------
 -- Installation directories
 
@@ -109,17 +105,11 @@ data InstallDirs dir = InstallDirs
   , sysconfdir :: dir
   }
   deriving (Eq, Read, Show, Functor, Generic)
+  deriving (Semigroup, Monoid) via Generically (InstallDirs dir)
 
 instance Binary dir => Binary (InstallDirs dir)
 instance NFData dir => NFData (InstallDirs dir)
 instance Structured dir => Structured (InstallDirs dir)
-
-instance (Semigroup dir, Monoid dir) => Monoid (InstallDirs dir) where
-  mempty = gmempty
-  mappend = (<>)
-
-instance Semigroup dir => Semigroup (InstallDirs dir) where
-  (<>) = gmappend
 
 combineInstallDirs
   :: (a -> b -> c)
@@ -219,46 +209,47 @@ defaultInstallDirs' False comp userInstall _hasLibs = do
     case buildOS of
       Windows -> return "$prefix"
       _ -> return ("$prefix" </> "lib")
-  return $
-    fmap toPathTemplate $
-      InstallDirs
-        { prefix = installPrefix
-        , bindir = "$prefix" </> "bin"
-        , libdir = installLibDir
-        , libsubdir = case comp of
-            UHC -> "$pkgid"
-            _other -> "$abi" </> "$libname"
-        , dynlibdir =
-            "$libdir" </> case comp of
+  return
+    ( toPathTemplate
+        <$> InstallDirs
+          { prefix = installPrefix
+          , bindir = "$prefix" </> "bin"
+          , libdir = installLibDir
+          , libsubdir = case comp of
               UHC -> "$pkgid"
-              _other -> "$abi"
-        , bytecodelibdir = "$libdir" </> "$libsubdir"
-        , libexecsubdir = "$abi" </> "$pkgid"
-        , flibdir = "$libdir"
-        , libexecdir = case buildOS of
-            Windows -> "$prefix" </> "$libname"
-            Haiku -> "$libdir"
-            _other -> "$prefix" </> "libexec"
-        , includedir = case buildOS of
-            Haiku -> "$prefix" </> "develop" </> "headers"
-            _other -> "$libdir" </> "$libsubdir" </> "include"
-        , datadir = case buildOS of
-            Windows -> "$prefix"
-            Haiku -> "$prefix" </> "data"
-            _other -> "$prefix" </> "share"
-        , datasubdir = "$abi" </> "$pkgid"
-        , docdir = case buildOS of
-            Haiku -> "$prefix" </> "documentation"
-            _other -> "$datadir" </> "doc" </> "$abi" </> "$pkgid"
-        , mandir = case buildOS of
-            Haiku -> "$docdir" </> "man"
-            _other -> "$datadir" </> "man"
-        , htmldir = "$docdir" </> "html"
-        , haddockdir = "$htmldir"
-        , sysconfdir = case buildOS of
-            Haiku -> "boot" </> "system" </> "settings"
-            _other -> "$prefix" </> "etc"
-        }
+              _other -> "$abi" </> "$libname"
+          , dynlibdir =
+              "$libdir" </> case comp of
+                UHC -> "$pkgid"
+                _other -> "$abi"
+          , bytecodelibdir = "$libdir" </> "$libsubdir"
+          , libexecsubdir = "$abi" </> "$pkgid"
+          , flibdir = "$libdir"
+          , libexecdir = case buildOS of
+              Windows -> "$prefix" </> "$libname"
+              Haiku -> "$libdir"
+              _other -> "$prefix" </> "libexec"
+          , includedir = case buildOS of
+              Haiku -> "$prefix" </> "develop" </> "headers"
+              _other -> "$libdir" </> "$libsubdir" </> "include"
+          , datadir = case buildOS of
+              Windows -> "$prefix"
+              Haiku -> "$prefix" </> "data"
+              _other -> "$prefix" </> "share"
+          , datasubdir = "$abi" </> "$pkgid"
+          , docdir = case buildOS of
+              Haiku -> "$prefix" </> "documentation"
+              _other -> "$datadir" </> "doc" </> "$abi" </> "$pkgid"
+          , mandir = case buildOS of
+              Haiku -> "$docdir" </> "man"
+              _other -> "$datadir" </> "man"
+          , htmldir = "$docdir" </> "html"
+          , haddockdir = "$htmldir"
+          , sysconfdir = case buildOS of
+              Haiku -> "boot" </> "system" </> "settings"
+              _other -> "$prefix" </> "etc"
+          }
+    )
 
 -- ---------------------------------------------------------------------------
 -- Converting directories, absolute or prefix-relative
@@ -570,25 +561,25 @@ foreign import capi unsafe "shlobj.h SHGetFolderPathW"
 -- FieldGrammar
 
 installDirsGrammar :: ParsecFieldGrammar' (InstallDirs (Flag PathTemplate))
-installDirsGrammar =
-  InstallDirs
-    <$> optionalFieldDef "prefix" installDirsPrefixLens mempty
-    <*> optionalFieldDef "bindir" installDirsBindirLens mempty
-    <*> optionalFieldDef "libdir" installDirsLibdirLens mempty
-    <*> optionalFieldDef "libsubdir" installDirsLibsubdirLens mempty
-    <*> optionalFieldDef "dynlibdir" installDirsDynlibdirLens mempty
-    <*> optionalFieldDef "bytecodelibdir" installDirsBytecodelibdirLens mempty
-    <*> pure NoFlag -- flibdir
-    <*> optionalFieldDef "libexecdir" installDirsLibexecdirLens mempty
-    <*> optionalFieldDef "libexecsubdir" installDirsLibexecsubdirLens mempty
-    <*> pure NoFlag -- includedir
-    <*> optionalFieldDef "datadir" installDirsDatadirLens mempty
-    <*> optionalFieldDef "datasubdir" installDirsDatasubdirLens mempty
-    <*> optionalFieldDef "docdir" installDirsDocdirLens mempty
-    <*> pure NoFlag -- mandir
-    <*> optionalFieldDef "htmldir" installDirsHtmldirLens mempty
-    <*> optionalFieldDef "haddockdir" installDirsHaddockdirLens mempty
-    <*> optionalFieldDef "sysconfdir" installDirsSysconfdirLens mempty
+installDirsGrammar = do
+  prefix <- optionalFieldDef "prefix" installDirsPrefixLens mempty
+  bindir <- optionalFieldDef "bindir" installDirsBindirLens mempty
+  libdir <- optionalFieldDef "libdir" installDirsLibdirLens mempty
+  libsubdir <- optionalFieldDef "libsubdir" installDirsLibsubdirLens mempty
+  dynlibdir <- optionalFieldDef "dynlibdir" installDirsDynlibdirLens mempty
+  bytecodelibdir <- optionalFieldDef "bytecodelibdir" installDirsBytecodelibdirLens mempty
+  let flibdir = NoFlag
+  libexecdir <- optionalFieldDef "libexecdir" installDirsLibexecdirLens mempty
+  libexecsubdir <- optionalFieldDef "libexecsubdir" installDirsLibexecsubdirLens mempty
+  let includedir = NoFlag
+  datadir <- optionalFieldDef "datadir" installDirsDatadirLens mempty
+  datasubdir <- optionalFieldDef "datasubdir" installDirsDatasubdirLens mempty
+  docdir <- optionalFieldDef "docdir" installDirsDocdirLens mempty
+  let mandir = NoFlag
+  htmldir <- optionalFieldDef "htmldir" installDirsHtmldirLens mempty
+  haddockdir <- optionalFieldDef "haddockdir" installDirsHaddockdirLens mempty
+  sysconfdir <- optionalFieldDef "sysconfdir" installDirsSysconfdirLens mempty
+  pure InstallDirs{..}
 
 -- ---------------------------------------------------------------------------
 -- Lenses

@@ -1,18 +1,14 @@
 {-# LANGUAGE CPP #-}
 {-# LANGUAGE DataKinds #-}
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GADTs #-}
 #if MIN_VERSION_base(4,21,0)
 {-# LANGUAGE ImplicitParams #-}
 #endif
-{-# LANGUAGE InstanceSigs #-}
 {-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE RankNTypes #-}
-{-# LANGUAGE ScopedTypeVariables #-}
 #ifdef GIT_REV
 {-# LANGUAGE TemplateHaskell #-}
 #endif
+{-# LANGUAGE ViewPatterns #-}
 
 -----------------------------------------------------------------------------
 
@@ -46,6 +42,7 @@ module Distribution.Simple.Utils
   , isUserException
   , warn
   , warnError
+  , labelMessage
   , notice
   , noticeNoWrap
   , noticeDoc
@@ -209,6 +206,9 @@ module Distribution.Simple.Utils
   , isAbsoluteOnAnyPlatform
   , isRelativeOnAnyPlatform
   , exceptionWithCallStackPrefix
+
+    -- * Cross-process locking
+  , withFileLock
   ) where
 
 import Distribution.Compat.Async (waitCatch, withAsyncNF)
@@ -249,11 +249,13 @@ import Data.Typeable
 
 import Control.Concurrent (threadDelay)
 import qualified Control.Exception as Exception
+import Data.Kind
 import Data.Time.Clock.POSIX (POSIXTime, getPOSIXTime)
 import qualified Data.Version as DV
 import Distribution.Compat.Process (proc)
 import Foreign.C.Error (Errno (..), ePIPE)
 import qualified GHC.IO.Exception as GHC
+import GHC.IO.Handle.Lock (LockMode (..), hLock, hTryLock, hUnlock)
 import GHC.Stack (HasCallStack)
 import Numeric (showFFloat)
 import System.Directory
@@ -286,6 +288,7 @@ import System.FilePath as FilePath
 import System.IO
   ( BufferMode (..)
   , Handle
+  , IOMode (..)
   , hClose
   , hFlush
   , hGetContents
@@ -293,6 +296,7 @@ import System.IO
   , hPutStrLn
   , hSetBinaryMode
   , hSetBuffering
+  , openFile
   , stderr
   , stdin
   , stdout
@@ -454,9 +458,7 @@ dieWithLocation' verbosity filename mb_lineno msg =
 die' :: Verbosity -> String -> IO a
 die' verbosity msg = withFrozenCallStack $ do
   ioError . verbatimUserError
-    =<< annotateErrorString verbosity
-    =<< pure . wrapTextVerbosity (verbosityFlags verbosity)
-    =<< pure . addErrorPrefix
+    =<< annotateErrorString verbosity . wrapTextVerbosity (verbosityFlags verbosity) . addErrorPrefix
     =<< prefixWithProgName msg
 
 -- Type which will be a wrapper for cabal -exceptions and cabal-install exceptions
@@ -464,7 +466,7 @@ data VerboseException a = VerboseException CallStack POSIXTime VerbosityFlags a
   deriving (Show)
 
 -- Function which will replace the existing die' call sites
-dieWithException :: (HasCallStack, Show a1, Typeable a1, Exception (VerboseException a1)) => Verbosity -> a1 -> IO a
+dieWithException :: (HasCallStack, Exception (VerboseException a1)) => Verbosity -> a1 -> IO a
 dieWithException verbosity exception = do
   ts <- getPOSIXTime
   throwIO $ VerboseException callStack ts (verbosityFlags verbosity) exception
@@ -539,7 +541,7 @@ ioeErrorString :: Lens' IOError String
 ioeErrorString f ioe = ioeSetErrorString ioe <$> f (ioeGetErrorString ioe)
 
 -- | Check that the type of the exception matches the given user error type.
-isUserException :: forall user_err. Typeable user_err => Proxy user_err -> Exception.SomeException -> Bool
+isUserException :: forall (user_err :: Type). Typeable user_err => Proxy user_err -> Exception.SomeException -> Bool
 isUserException Proxy (SomeException se) =
   case cast se :: Maybe user_err of
     Just{} -> True
@@ -622,17 +624,27 @@ topHandler is_user_exception prog = topHandlerWith is_user_exception (const $ ex
 --
 -- We display these at the 'normal' verbosity level.
 warn :: Verbosity -> String -> IO ()
-warn verbosity msg = warnMessage "Warning" verbosity msg
+warn verbosity msg = labelMessage "Warning" Nothing verbosity msg
 
 -- | Like 'warn', but prepend @Error: …@ instead of @Warning: …@ before the
 -- the message. Useful when you want to highlight the condition is an error
 -- but do not want to quit the program yet.
 warnError :: Verbosity -> String -> IO ()
-warnError verbosity message = warnMessage "Error" verbosity message
+warnError verbosity message = labelMessage "Error" Nothing verbosity message
 
--- | Warning message, with a custom label.
-warnMessage :: String -> Verbosity -> String -> IO ()
-warnMessage l verbosity msg = withFrozenCallStack $ do
+-- | A message with a supplied label. If no punctuation is given, it defaults to
+-- ": ".
+--
+-- If "Warning" is supplied as the label and `Nothing` as punctuation then the
+-- effective prefix is "Warning: ".
+--
+-- The punctuation allows for a second level of labelling. For instance,
+-- "Warning" with `Just (": " ++ pkgName ++ " ")` as punctuation would yield
+-- "Warning: pkgName " as the effective prefix to the message.
+--
+-- @since 3.20.0.0
+labelMessage :: String -> Maybe String -> Verbosity -> String -> IO ()
+labelMessage label (fromMaybe ": " -> punctuation) verbosity msg = withFrozenCallStack $ do
   when (verbosityLevel verbosity >= Normal && not (isVerboseNoWarn flags)) $ do
     ts <- getPOSIXTime
     let outHandle = verbosityChosenOutputHandle verbosity
@@ -641,9 +653,24 @@ warnMessage l verbosity msg = withFrozenCallStack $ do
     hPutStr errHandle
       . withMetadata ts NormalMark FlagTrace flags
       . wrapTextVerbosity flags
-      $ l ++ ": " ++ msg
+      $ label ++ punctuation ++ msg
   where
     flags = verbosityFlags verbosity
+
+ifLevelLogMsgWrap :: VerbosityLevel -> MarkWhen -> Verbosity -> String -> IO ()
+ifLevelLogMsgWrap level markWhen verbosity@(verbosityFlags -> flags) (wrapTextVerbosity flags -> msg) =
+  when (verbosityLevel verbosity >= level) (logMsg markWhen verbosity msg)
+
+ifLevelLogMsg :: VerbosityLevel -> MarkWhen -> Verbosity -> String -> IO ()
+ifLevelLogMsg level markWhen verbosity msg =
+  when (verbosityLevel verbosity >= level) (logMsg markWhen verbosity msg)
+
+logMsg :: MarkWhen -> Verbosity -> String -> IO ()
+logMsg markWhen verbosity@(verbosityChosenOutputHandle -> h) msg = withFrozenCallStack $ do
+  ts <- getPOSIXTime
+  hPutStr h $ withMetadata ts markWhen FlagTrace (verbosityFlags verbosity) msg
+  -- REVIEW: Should we always flush or only for the debug functions?
+  hFlush stdout
 
 -- | Useful status messages.
 --
@@ -652,91 +679,44 @@ warnMessage l verbosity msg = withFrozenCallStack $ do
 -- This is for the ordinary helpful status messages that users see. Just
 -- enough information to know that things are working but not floods of detail.
 notice :: Verbosity -> String -> IO ()
-notice verbosity msg = withFrozenCallStack $ do
-  when (verbosityLevel verbosity >= Normal) $ do
-    let h = verbosityChosenOutputHandle verbosity
-        flags = verbosityFlags verbosity
-    ts <- getPOSIXTime
-    hPutStr h $
-      withMetadata ts NormalMark FlagTrace flags $
-        wrapTextVerbosity flags msg
+notice = ifLevelLogMsgWrap Normal NormalMark
 
 -- | Display a message at 'normal' verbosity level, but without
 -- wrapping.
 noticeNoWrap :: Verbosity -> String -> IO ()
-noticeNoWrap verbosity msg = withFrozenCallStack $ do
-  when (verbosityLevel verbosity >= Normal) $ do
-    let h = verbosityChosenOutputHandle verbosity
-        flags = verbosityFlags verbosity
-    ts <- getPOSIXTime
-    hPutStr h . withMetadata ts NormalMark FlagTrace flags $ msg
+noticeNoWrap = ifLevelLogMsg Normal NormalMark
 
 -- | Pretty-print a 'Disp.Doc' status message at 'normal' verbosity
 -- level.  Use this if you need fancy formatting.
 noticeDoc :: Verbosity -> Disp.Doc -> IO ()
-noticeDoc verbosity msg = withFrozenCallStack $ do
-  when (verbosityLevel verbosity >= Normal) $ do
-    let h = verbosityChosenOutputHandle verbosity
-        flags = verbosityFlags verbosity
-    ts <- getPOSIXTime
-    hPutStr h $
-      withMetadata ts NormalMark FlagTrace flags $
-        Disp.renderStyle defaultStyle msg
+noticeDoc verbosity (Disp.renderStyle defaultStyle -> msg) =
+  ifLevelLogMsg Normal NormalMark verbosity msg
 
 -- | Display a "setup status message".  Prefer using setupMessage'
 -- if possible.
 setupMessage :: Verbosity -> String -> PackageIdentifier -> IO ()
-setupMessage verbosity msg pkgid = withFrozenCallStack $ do
+setupMessage verbosity msg pkgid = do
   noticeNoWrap verbosity (msg ++ ' ' : prettyShow pkgid ++ "...")
 
 -- | More detail on the operation of some action.
 --
 -- We display these messages when the verbosity level is 'verbose'
 info :: Verbosity -> String -> IO ()
-info verbosity msg = withFrozenCallStack $
-  when (verbosityLevel verbosity >= Verbose) $ do
-    let h = verbosityChosenOutputHandle verbosity
-        flags = verbosityFlags verbosity
-    ts <- getPOSIXTime
-    hPutStr h $
-      withMetadata ts NeverMark FlagTrace flags $
-        wrapTextVerbosity flags msg
+info = ifLevelLogMsgWrap Verbose NeverMark
 
 infoNoWrap :: Verbosity -> String -> IO ()
-infoNoWrap verbosity msg = withFrozenCallStack $
-  when (verbosityLevel verbosity >= Verbose) $ do
-    let h = verbosityChosenOutputHandle verbosity
-        flags = verbosityFlags verbosity
-    ts <- getPOSIXTime
-    hPutStr h $
-      withMetadata ts NeverMark FlagTrace flags msg
+infoNoWrap = ifLevelLogMsg Verbose NeverMark
 
 -- | Detailed internal debugging information
 --
 -- We display these messages when the verbosity level is 'deafening'
 debug :: Verbosity -> String -> IO ()
-debug verbosity msg = withFrozenCallStack $
-  when (verbosityLevel verbosity >= Deafening) $ do
-    let h = verbosityChosenOutputHandle verbosity
-        flags = verbosityFlags verbosity
-    ts <- getPOSIXTime
-    hPutStr h $
-      withMetadata ts NeverMark FlagTrace flags $
-        wrapTextVerbosity flags msg
-    -- ensure that we don't lose output if we segfault/infinite loop
-    hFlush stdout
+debug = ifLevelLogMsgWrap Deafening NeverMark
 
 -- | A variant of 'debug' that doesn't perform the automatic line
 -- wrapping. Produces better output in some cases.
 debugNoWrap :: Verbosity -> String -> IO ()
-debugNoWrap verbosity msg = withFrozenCallStack $
-  when (verbosityLevel verbosity >= Deafening) $ do
-    let h = verbosityChosenOutputHandle verbosity
-    ts <- getPOSIXTime
-    hPutStr h $
-      withMetadata ts NeverMark FlagTrace (verbosityFlags verbosity) msg
-    -- ensure that we don't lose output if we segfault/infinite loop
-    hFlush stdout
+debugNoWrap = ifLevelLogMsg Deafening NeverMark
 
 -- | Perform an IO action, catching any IO exceptions and printing an error
 --   if one occurs.
@@ -973,18 +953,19 @@ rawSystemExitCode
   -> Maybe [(String, String)]
   -> IO ExitCode
 rawSystemExitCode verbosity mbWorkDir path args menv =
-  withFrozenCallStack $
-    fmap fst $
-      rawSystemIOWithEnvAndAction
-        verbosity
-        path
-        args
-        (fmap getSymbolicPath mbWorkDir)
-        menv
-        (\_ _ _ -> return ())
-        Nothing
-        Nothing
-        Nothing
+  withFrozenCallStack
+    ( fst
+        <$> rawSystemIOWithEnvAndAction
+          verbosity
+          path
+          args
+          (fmap getSymbolicPath mbWorkDir)
+          menv
+          (\_ _ _ -> return ())
+          Nothing
+          Nothing
+          Nothing
+    )
 
 -- | Execute the given command with the given arguments, returning
 -- the command's exit code.
@@ -1050,7 +1031,7 @@ compatWithCreateProcess verbosity cp action =
     -- of 'withCreateProcess_', but with special logic to avoid closing the
     -- verbosity handles.
     create =
-      (Process.createProcess_ "createProcess" cp)
+      Process.createProcess_ "createProcess" cp
         `Exception.finally` do
           maybeClose (Process.std_in cp)
           maybeClose (Process.std_out cp)
@@ -1605,6 +1586,24 @@ getDirectoryContentsRecursive topdir = recurseDirectories [""]
             then collect files (dirEntry : dirs') entries
             else collect (dirEntry : files) dirs' entries
 
+-- | Hold an exclusive cross-process lock on @lockPath@ for the duration of
+-- @action@, creating the lock file if it does not exist.
+withFileLock :: Verbosity -> FilePath -> String -> IO a -> IO a
+withFileLock verbosity lockPath waitMsg action =
+  Exception.bracket takeLock releaseLock (const action)
+  where
+    takeLock = do
+      h <- openFile lockPath ReadWriteMode
+      -- First try non-blocking, but if we would have to wait then
+      -- log an explanation and do it again in blocking mode.
+      gotlock <- hTryLock h ExclusiveLock
+      unless gotlock $ do
+        info verbosity waitMsg
+        hLock h ExclusiveLock
+      return h
+
+    releaseLock h = hUnlock h `Exception.finally` hClose h
+
 ------------------------
 -- Environment variables
 
@@ -1737,7 +1736,7 @@ installExecutableFile verbosity src dest = withFrozenCallStack $ do
 installMaybeExecutableFile :: Verbosity -> FilePath -> FilePath -> IO ()
 installMaybeExecutableFile verbosity src dest = withFrozenCallStack $ do
   perms <- getPermissions src
-  if (executable perms) -- only checks user x bit
+  if executable perms -- only checks user x bit
     then installExecutableFile verbosity src dest
     else installOrdinaryFile verbosity src dest
 

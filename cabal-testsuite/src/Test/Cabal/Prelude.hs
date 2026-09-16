@@ -1,15 +1,46 @@
 {-# LANGUAGE CPP #-}
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE NondecreasingIndentation #-}
 {-# LANGUAGE RecordWildCards #-}
-{-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE ViewPatterns #-}
+{-# OPTIONS_GHC -Wno-duplicate-exports #-}
+{-# OPTIONS_GHC -Wno-redundant-constraints #-}
 
 -- | Generally useful definitions that we expect most test scripts
 -- to use.
 module Test.Cabal.Prelude
-  ( module Test.Cabal.Prelude
+  ( -- * Assertions
+
+    -- ** Assert Marked Output
+    -- $marked-output
+    assertOutputContains
+  , assertOutputDoesNotContain
+  , assertOutputMatches
+  , assertOutputDoesNotMatch
+  , assertOn
+
+    -- ** Assert File
+  , assertFileDoesContain
+  , assertFileDoesNotContain
+  , assertFindInFile
+  , assertAnyFileContains
+  , assertNoFileContains
+
+    -- ** Assert Glob
+  , assertGlobMatches
+  , assertGlobDoesNotMatch
+  , assertGlobMatchesTestDir
+  , assertGlobDoesNotMatchTestDir
+
+    -- ** Other Assertions
+  , assertBool
+  , assertEqual
+  , assertExitCode
+  , assertFailure
+  , assertNotEqual
+  , assertRegex
+
+    -- * Re-exports
+  , module Test.Cabal.Prelude
   , module Test.Cabal.Monad
   , module Test.Cabal.NeedleHaystack
   , module Test.Cabal.Run
@@ -38,9 +69,6 @@ import Distribution.Simple.Configure
 import Distribution.Simple.PackageDescription (readGenericPackageDescription)
 import Distribution.Simple.Program
 import Distribution.Simple.Utils
-  ( tryFindPackageDesc
-  , withFileContents
-  )
 import Distribution.System (Arch (JavaScript), OS (Linux, OSX, Windows), buildArch, buildOS)
 import Distribution.Types.LocalBuildInfo
 import Distribution.Utils.Path
@@ -69,7 +97,7 @@ import qualified Data.ByteString.Base16 as Base16
 import qualified Data.ByteString.Char8 as C
 import qualified Data.ByteString.Lazy as BSL
 import qualified Data.Char as Char
-import Data.List (isInfixOf, isPrefixOf, stripPrefix)
+import Data.List (isPrefixOf, stripPrefix)
 import Data.Maybe (fromMaybe, isJust, mapMaybe)
 import Network.Wait (waitTcpVerbose)
 import System.Directory
@@ -86,6 +114,19 @@ import System.Process
 #ifndef mingw32_HOST_OS
 import System.Posix.Resource
 #endif
+
+-- $marked-output
+-- When asserting on the output of a command we only have access to the marked
+-- output. That is the output between these markers:
+--
+-- @
+-- -----BEGIN CABAL OUTPUT-----
+-- -----END CABAL OUTPUT-----
+-- @
+--
+-- This is the output from 'notice' and `warn` messages. It does not include the
+-- output from `debug` or `info` messages. This is mostly because the output
+-- from `debug` and `info` messages is not expected to be deterministic.
 
 ------------------------------------------------------------------------
 
@@ -151,7 +192,7 @@ addToPath exe_dir action = do
   env <- getTestEnv
   path <- liftIO $ getEnv "PATH"
   let newpath = exe_dir ++ [searchPathSeparator] ++ path
-  let new_env = (("PATH", Just newpath) : (testEnvironment env))
+  let new_env = ("PATH", Just newpath) : testEnvironment env
   withEnv new_env action
 
 -- HACK please don't use me
@@ -236,7 +277,7 @@ setup'' prefix cmd args = do
           else fail "Using act-as-setup for not 'build-type: Simple' package"
       else do
         if buildType (packageDescription pdesc) == Simple
-          then runM' (Just $ testTmpDir env) (testSetupPath env) (full_args) Nothing
+          then runM' (Just $ testTmpDir env) (testSetupPath env) full_args Nothing
           else -- Run the Custom script!
           do
             r <-
@@ -246,7 +287,7 @@ setup'' prefix cmd args = do
                   (Just $ testTmpDir env)
                   (testEnvironment env)
                   (testRelativeCurrentDir env </> prefix </> "Setup.hs")
-                  (full_args)
+                  full_args
             recordLog r
             requireSuccess r
 
@@ -904,17 +945,17 @@ assertOn isIn NeedleHaystack{..} (txFwd txNeedle -> needle) (txFwd txHaystack . 
         unless (needle `isIn` output) $
           assertFailure $
             "expected:\n"
-              ++ (txBwd txNeedle needle)
+              ++ txBwd txNeedle needle
               ++ if displayHaystack
-                then "\nin output:\n" ++ (txBwd txHaystack output)
+                then "\nin output:\n" ++ txBwd txHaystack output
                 else ""
       else
         when (needle `isInfixOf` output) $
           assertFailure $
             "unexpected:\n"
-              ++ (txBwd txNeedle needle)
+              ++ txBwd txNeedle needle
               ++ if displayHaystack
-                then "\nin output:\n" ++ (txBwd txHaystack output)
+                then "\nin output:\n" ++ txBwd txHaystack output
                 else ""
 
 assertOutputMatches :: MonadIO m => WithCallStack (String -> Result -> m ())
@@ -1116,9 +1157,7 @@ skipIfNoProfiledLibraries = skipUnless "no profiled libraries" =<< hasProfiledLi
 -- An example where this is needed is if you want to dynamically link
 -- detailed-0.9 test suites, since those depend on the Cabal library unde rtest.
 hasCabalShared :: TestM Bool
-hasCabalShared = do
-  env <- getTestEnv
-  return (testHaveCabalShared env)
+hasCabalShared = testHaveCabalShared <$> getTestEnv
 
 anyCabalVersion :: WithCallStack (String -> TestM Bool)
 anyCabalVersion = isCabalVersion any
@@ -1359,7 +1398,7 @@ delay = do
   liftIO . threadDelay $
     if is_old_ghc
       then 1000000
-      else (testMtimeChangeDelay env)
+      else testMtimeChangeDelay env
 
 -- | Create a symlink for the duration of the provided action. If the symlink
 -- already exists, it is deleted.
@@ -1394,7 +1433,7 @@ withShorterPathForNewBuildStore test =
   withTestDir
     (mkVerbosity defaultVerbosityHandles normal)
     "cabal-test-store"
-    (\f -> withStoreDir f test)
+    (`withStoreDir` test)
 
 -- | Find where a package locates in the store dir. This works only if there is exactly one 1 ghc version
 -- and exactly 1 directory for the given package in the store dir.

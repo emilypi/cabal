@@ -1,7 +1,9 @@
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 module Distribution.Fields.ConfVar (parseConditionConfVar, parseConditionConfVarFromClause) where
 
+import Data.Functor ((<&>))
 import Distribution.Compat.CharParsing (char, integral)
 import Distribution.Compat.Prelude
 import Distribution.Fields.Field (Field (..), SectionArg (..), sectionArgAnn)
@@ -35,7 +37,7 @@ import qualified Text.Parsec.Pos as P
 
 parseConditionConfVarFromClause :: B8.ByteString -> Either P.ParseError (Condition ConfVar)
 parseConditionConfVarFromClause x =
-  readFields x >>= \r -> case r of
+  readFields x >>= \case
     (Section _ xs _ : _) -> P.runParser (parser <* P.eof) () "<condition>" xs
     _ -> Left $ P.newErrorMessage (P.Message "No fields in clause") (P.initialPos "<condition>")
 
@@ -72,8 +74,8 @@ sepByNonEmpty p sep = (:|) <$> p <*> many (sep *> p)
 parser :: Parser (Condition ConfVar)
 parser = condOr
   where
-    condOr = sepByNonEmpty condAnd (oper "||") >>= return . foldl1 COr
-    condAnd = sepByNonEmpty cond (oper "&&") >>= return . foldl1 CAnd
+    condOr = sepByNonEmpty condAnd (oper "||") <&> foldl1 COr
+    condAnd = sepByNonEmpty cond (oper "&&") <&> foldl1 CAnd
     cond =
       P.choice
         [boolLiteral, parens condOr, notCond, osCond, archCond, flagCond, implCond]
@@ -124,11 +126,11 @@ parser = condOr
           ]
 
     -- Number token can have many dots in it: SecArgNum (Position 65 15) "7.6.1"
-    identBS = tokenPrim $ \t -> case t of
+    identBS = tokenPrim $ \case
       SecArgName _ s -> Just s
       _ -> Nothing
 
-    boolLiteral' = tokenPrim $ \t -> case t of
+    boolLiteral' = tokenPrim $ \case
       SecArgName _ s
         | s == "True" -> Just True
         | s == "true" -> Just True
@@ -137,11 +139,11 @@ parser = condOr
       _ -> Nothing
 
     string :: B8.ByteString -> Parser ()
-    string s = tokenPrim $ \t -> case t of
+    string s = tokenPrim $ \case
       SecArgName _ s' | s == s' -> Just ()
       _ -> Nothing
 
-    oper o = tokenPrim $ \t -> case t of
+    oper o = tokenPrim $ \case
       SecArgOther _ o' | o == o' -> Just ()
       _ -> Nothing
 
@@ -152,7 +154,7 @@ parser = condOr
     updatePosition :: P.SourcePos -> SectionArg Position -> [SectionArg Position] -> P.SourcePos
     updatePosition x s _ =
       let Position line col = sectionArgAnn s
-       in P.setSourceLine (P.setSourceColumn x col) (line)
+       in P.setSourceLine (P.setSourceColumn x col) line
     prettySectionArg = show
 
     fromParsec :: Parsec a => Parser a

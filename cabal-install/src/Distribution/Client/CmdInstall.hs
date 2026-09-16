@@ -1,13 +1,10 @@
 {-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE RecordWildCards #-}
-{-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE TupleSections #-}
 
--- | cabal-install CLI command: build
+-- | cabal-install CLI command: install
 module Distribution.Client.CmdInstall
-  ( -- * The @build@ CLI and action
+  ( -- * The @install@ CLI and action
     installCommand
   , installAction
 
@@ -144,7 +141,7 @@ import Distribution.Simple.Flag
 import Distribution.Simple.GHC
   ( GhcEnvironmentFileEntry (..)
   , GhcImplInfo (..)
-  , ParseErrorExc
+  , ParseErrorExc (..)
   , getGhcAppDir
   , getImplInfo
   , ghcPlatformAndVersionString
@@ -745,7 +742,7 @@ getClientInstallFlags :: Verbosity -> GlobalFlags -> ClientInstallFlags -> IO Cl
 getClientInstallFlags verbosity globalFlags existingClientInstallFlags = do
   let configFileFlag = globalConfigFile globalFlags
   savedConfig <- loadConfig verbosity configFileFlag
-  pure $ savedClientInstallFlags savedConfig `mappend` existingClientInstallFlags
+  pure $ savedClientInstallFlags savedConfig <> existingClientInstallFlags
 
 getSpecsAndTargetSelectors
   :: Verbosity
@@ -1246,7 +1243,7 @@ installBuiltExe
 
 -- | Create 'GhcEnvironmentFileEntry's for packages with exposed libraries.
 entriesForLibraryComponents :: TargetsMap -> [GhcEnvironmentFileEntry FilePath]
-entriesForLibraryComponents = Map.foldrWithKey' (\k v -> mappend (go k v)) []
+entriesForLibraryComponents = Map.foldrWithKey' (\k v -> (go k v <>)) []
   where
     hasLib :: (ComponentTarget, NonEmpty TargetSelector) -> Bool
     hasLib (ComponentTarget (CLibName _) _, _) = True
@@ -1294,12 +1291,13 @@ getExistingEnvEntries verbosity compilerFlavor supportsPkgEnvFiles envFile = do
     if (compilerFlavor == GHC || compilerFlavor == GHCJS)
       && supportsPkgEnvFiles
       && envFileExists
-      then catch ((True,) <$> readGhcEnvironmentFile envFile) $ \(_ :: ParseErrorExc) ->
+      then catch ((True,) <$> readGhcEnvironmentFile envFile) $ \(ParseErrorExc parseError) ->
         warn
           verbosity
           ( "The environment file "
               ++ envFile
-              ++ " is unparsable. Libraries cannot be installed."
+              ++ " is unparsable. Libraries cannot be installed.\n"
+              ++ show parseError
           )
           >> return (False, [])
       else return (False, [])

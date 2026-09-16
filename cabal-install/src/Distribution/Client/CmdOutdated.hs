@@ -1,4 +1,4 @@
-{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE MultiWayIf #-}
 {-# LANGUAGE RecordWildCards #-}
 
@@ -100,8 +100,7 @@ outdatedCommand =
           "Checks for outdated dependencies in the package description file "
             ++ "or freeze file"
     , commandNotes = Nothing
-    , commandUsage = \pname ->
-        "Usage: " ++ pname ++ " outdated [FLAGS] [PACKAGES]\n"
+    , commandUsage = usageAlternatives "v2-outdated" ["[FLAGS] [PACKAGES]"]
     , commandDefaultFlags = defaultNixStyleFlags defaultOutdatedFlags
     , commandOptions = nixStyleOptions $ \showOrParseArgs ->
         outdatedOptions showOrParseArgs
@@ -118,7 +117,6 @@ data IgnoreMajorVersionBumps
 
 instance Monoid IgnoreMajorVersionBumps where
   mempty = IgnoreMajorVersionBumpsNone
-  mappend = (<>)
 
 instance Semigroup IgnoreMajorVersionBumps where
   IgnoreMajorVersionBumpsNone <> r = r
@@ -203,7 +201,7 @@ outdatedOptions _showOrParseArgs =
       ( optArg
           "PKGS"
           ignoreMajorVersionBumpsParser
-          ("", Just IgnoreMajorVersionBumpsAll)
+          (Just IgnoreMajorVersionBumpsAll)
           ignoreMajorVersionBumpsPrinter
       )
   ]
@@ -281,14 +279,14 @@ outdatedAction flags targetStrings globalFlags =
     exitCode = fromFlagOrDefault quiet outdatedExitCode
     ignorePred =
       let ignoreSet = S.fromList outdatedIgnore
-       in \pkgname -> pkgname `S.member` ignoreSet
+       in (`S.member` ignoreSet)
     minorPred = case outdatedMinor of
       Nothing -> const False
       Just IgnoreMajorVersionBumpsNone -> const False
       Just IgnoreMajorVersionBumpsAll -> const True
       Just (IgnoreMajorVersionBumpsSome pkgs) ->
         let minorSet = S.fromList pkgs
-         in \pkgname -> pkgname `S.member` minorSet
+         in (`S.member` minorSet)
 
 reportOutdatedTargetProblem :: Verbosity -> [TargetProblem'] -> IO a
 reportOutdatedTargetProblem verbosity problems =
@@ -322,7 +320,7 @@ showResult verbosity outdatedDeps simpleOutput =
         pkgGroups =
           Map.fromListWith
             (Map.unionWith (++))
-            [ (pkg, (Map.singleton comp [d]))
+            [ (pkg, Map.singleton comp [d])
             | (pkg, comp, d) <- pkgCompDeps
             ]
        in
@@ -377,7 +375,7 @@ instance Pretty (OutdatedDependencyX Version) where
 
 instance Pretty (OutdatedDependencyX ()) where
   pretty (OutdatedDependency dep _ src) =
-    pretty dep <+> PP.text "(from:" <+> PP.text (prettyOutdatedDependencySource src) `mappend` PP.text ")"
+    pretty dep <+> PP.text "(from:" <+> (PP.text (prettyOutdatedDependencySource src) <> PP.text ")")
 
 data OutdatedDependencySource = ConfigSource ConstraintSource | ComponentSource PackageId ComponentTarget
 
@@ -495,7 +493,7 @@ listOutdated deps sourceDb (ListOutdatedSettings ignorePred minorPred) =
 selectPackageTargetsForOutdated
   :: TargetSelector
   -> [AvailableTarget k]
-  -> Either (TargetProblem') [k]
+  -> Either TargetProblem' [k]
 selectPackageTargetsForOutdated targetSelector targets
   -- No targets available at all is an error
   | null targets = Left (TargetProblemNoTargets targetSelector)
@@ -507,7 +505,7 @@ selectPackageTargetsForOutdated targetSelector targets
 selectComponentTargetForOutdated
   :: SubComponentTarget
   -> AvailableTarget k
-  -> Either (TargetProblem') k
+  -> Either TargetProblem' k
 selectComponentTargetForOutdated subtarget target =
   selectComponentTargetBasic subtarget target
 
@@ -523,7 +521,7 @@ depsFromLocalPackages verbosity ctx targetSelectors = do
         selectComponentTargetForOutdated
         (localPackages ctx)
         targetSelectors
-  fmap concat <$> forM (localPackages ctx) $ \pkg -> case pkg of
+  fmap concat <$> forM (localPackages ctx) $ \case
     SpecificSourcePackage pkg' -> do
       -- Find the package in the resolved targets
       let pkgId = packageId pkg'

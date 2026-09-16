@@ -1,12 +1,6 @@
-{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE DerivingVia #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE PatternSynonyms #-}
-{-# LANGUAGE RankNTypes #-}
-{-# LANGUAGE ScopedTypeVariables #-}
-
------------------------------------------------------------------------------
-
------------------------------------------------------------------------------
 
 -- |
 -- Module      :  Distribution.Client.Setup
@@ -244,6 +238,7 @@ import Distribution.Version
 import Control.Exception
   ( assert
   )
+import Data.Functor (($>))
 import Data.List
   ( deleteFirstsBy
   )
@@ -322,6 +317,8 @@ globalCommand commands =
               , "new-clean"
               , "new-sdist"
               , "new-haddock-project"
+              , "new-gen-bounds"
+              , "new-outdated"
               , "list-bin"
               , -- v1 commands, stateful style
                 "v1-build"
@@ -341,6 +338,7 @@ globalCommand commands =
               , "v1-copy"
               , "v1-register"
               , "v1-reconfigure"
+              , "v1-gen-bounds"
               , -- v2 commands, nix-style
                 "v2-target"
               , "v2-build"
@@ -357,6 +355,8 @@ globalCommand commands =
               , "v2-install"
               , "v2-clean"
               , "v2-sdist"
+              , "v2-gen-bounds"
+              , "v2-outdated"
               ]
           maxlen = maximum $ [length name | (name, _) <- cmdDescs]
           align str = str ++ replicate (maxlen - length str) ' '
@@ -430,6 +430,8 @@ globalCommand commands =
                 , addCmd "v2-install"
                 , addCmd "v2-clean"
                 , addCmd "v2-sdist"
+                , addCmd "v2-outdated"
+                , addCmd "v2-gen-bounds"
                 , par
                 , startGroup "legacy command aliases"
                 , addCmd "v1-build"
@@ -445,6 +447,7 @@ globalCommand commands =
                 , addCmd "v1-copy"
                 , addCmd "v1-register"
                 , addCmd "v1-reconfigure"
+                , addCmd "v1-gen-bounds"
                 ]
                   ++ if null otherCmds
                     then []
@@ -917,6 +920,7 @@ data ConfigExFlags = ConfigExFlags
       :: Flag WriteGhcEnvironmentFilesPolicy
   }
   deriving (Eq, Show, Generic)
+  deriving (Semigroup, Monoid) via Generically ConfigExFlags
 
 defaultConfigExFlags :: ConfigExFlags
 defaultConfigExFlags = mempty{configSolver = Flag defaultSolver}
@@ -1008,25 +1012,25 @@ configureExOptions _showOrParseArgs src =
   , option
       []
       ["allow-older"]
-      ("Ignore lower bounds in all dependencies or DEPS")
+      "Ignore lower bounds in all dependencies or DEPS"
       (fmap unAllowOlder . configAllowOlder)
       (\v flags -> flags{configAllowOlder = fmap AllowOlder v})
       ( optArg
           "DEPS"
           (parsecToReadEErr unexpectMsgString relaxDepsParser)
-          (show RelaxDepsAll, Just RelaxDepsAll)
+          (Just RelaxDepsAll)
           relaxDepsPrinter
       )
   , option
       []
       ["allow-newer"]
-      ("Ignore upper bounds in all dependencies or DEPS")
+      "Ignore upper bounds in all dependencies or DEPS"
       (fmap unAllowNewer . configAllowNewer)
       (\v flags -> flags{configAllowNewer = fmap AllowNewer v})
       ( optArg
           "DEPS"
           (parsecToReadEErr unexpectMsgString relaxDepsParser)
-          (show RelaxDepsAll, Just RelaxDepsAll)
+          (Just RelaxDepsAll)
           relaxDepsPrinter
       )
   , option
@@ -1074,17 +1078,10 @@ relaxDepsParser = do
           ++ "packages to use newer versions."
     else return . Just . RelaxDepsSome . toList $ rs
 
-relaxDepsPrinter :: (Maybe RelaxDeps) -> [Maybe String]
+relaxDepsPrinter :: Maybe RelaxDeps -> [Maybe String]
 relaxDepsPrinter Nothing = []
 relaxDepsPrinter (Just RelaxDepsAll) = [Nothing]
 relaxDepsPrinter (Just (RelaxDepsSome pkgs)) = map (Just . prettyShow) pkgs
-
-instance Monoid ConfigExFlags where
-  mempty = gmempty
-  mappend = (<>)
-
-instance Semigroup ConfigExFlags where
-  (<>) = gmappend
 
 reconfigureCommand :: CommandUI (ConfigFlags, ConfigExFlags)
 reconfigureCommand =
@@ -1401,7 +1398,7 @@ data FetchFlags = FetchFlags
   , fetchFineGrainedConflicts :: Flag FineGrainedConflicts
   , fetchMinimizeConflictSet :: Flag MinimizeConflictSet
   , fetchIndependentGoals :: Flag IndependentGoals
-  , fetchPreferOldest :: Flag PreferOldest
+  , fetchPreferVersion :: Flag PreferVersion
   , fetchShadowPkgs :: Flag ShadowPkgs
   , fetchStrongFlags :: Flag StrongFlags
   , fetchAllowBootLibInstalls :: Flag AllowBootLibInstalls
@@ -1424,7 +1421,7 @@ defaultFetchFlags =
     , fetchFineGrainedConflicts = Flag (FineGrainedConflicts True)
     , fetchMinimizeConflictSet = Flag (MinimizeConflictSet False)
     , fetchIndependentGoals = Flag (IndependentGoals False)
-    , fetchPreferOldest = Flag (PreferOldest False)
+    , fetchPreferVersion = Flag PreferInstalledOrLatest
     , fetchShadowPkgs = Flag (ShadowPkgs False)
     , fetchStrongFlags = Flag (StrongFlags False)
     , fetchAllowBootLibInstalls = Flag (AllowBootLibInstalls False)
@@ -1507,8 +1504,8 @@ fetchCommand =
             (\v flags -> flags{fetchMinimizeConflictSet = v})
             fetchIndependentGoals
             (\v flags -> flags{fetchIndependentGoals = v})
-            fetchPreferOldest
-            (\v flags -> flags{fetchPreferOldest = v})
+            fetchPreferVersion
+            (\v flags -> flags{fetchPreferVersion = v})
             fetchShadowPkgs
             (\v flags -> flags{fetchShadowPkgs = v})
             fetchStrongFlags
@@ -1536,7 +1533,7 @@ data FreezeFlags = FreezeFlags
   , freezeFineGrainedConflicts :: Flag FineGrainedConflicts
   , freezeMinimizeConflictSet :: Flag MinimizeConflictSet
   , freezeIndependentGoals :: Flag IndependentGoals
-  , freezePreferOldest :: Flag PreferOldest
+  , freezePreferVersion :: Flag PreferVersion
   , freezeShadowPkgs :: Flag ShadowPkgs
   , freezeStrongFlags :: Flag StrongFlags
   , freezeAllowBootLibInstalls :: Flag AllowBootLibInstalls
@@ -1557,7 +1554,7 @@ defaultFreezeFlags =
     , freezeFineGrainedConflicts = Flag (FineGrainedConflicts True)
     , freezeMinimizeConflictSet = Flag (MinimizeConflictSet False)
     , freezeIndependentGoals = Flag (IndependentGoals False)
-    , freezePreferOldest = Flag (PreferOldest False)
+    , freezePreferVersion = Flag PreferInstalledOrLatest
     , freezeShadowPkgs = Flag (ShadowPkgs False)
     , freezeStrongFlags = Flag (StrongFlags False)
     , freezeAllowBootLibInstalls = Flag (AllowBootLibInstalls False)
@@ -1629,8 +1626,8 @@ freezeCommand =
             (\v flags -> flags{freezeMinimizeConflictSet = v})
             freezeIndependentGoals
             (\v flags -> flags{freezeIndependentGoals = v})
-            freezePreferOldest
-            (\v flags -> flags{freezePreferOldest = v})
+            freezePreferVersion
+            (\v flags -> flags{freezePreferVersion = v})
             freezeShadowPkgs
             (\v flags -> flags{freezeShadowPkgs = v})
             freezeStrongFlags
@@ -1822,6 +1819,7 @@ data ReportFlags = ReportFlags
   , reportRepoName :: Flag RepoName
   }
   deriving (Generic)
+  deriving (Semigroup, Monoid) via Generically ReportFlags
 
 defaultReportFlags :: ReportFlags
 defaultReportFlags =
@@ -1889,13 +1887,6 @@ reportCommand =
         ]
     }
 
-instance Monoid ReportFlags where
-  mempty = gmempty
-  mappend = (<>)
-
-instance Semigroup ReportFlags where
-  (<>) = gmappend
-
 -- ------------------------------------------------------------
 
 -- * Get flags
@@ -1913,6 +1904,7 @@ data GetFlags = GetFlags
   , getRepoName :: Flag RepoName
   }
   deriving (Generic)
+  deriving (Semigroup, Monoid) via Generically GetFlags
 
 defaultGetFlags :: GetFlags
 defaultGetFlags =
@@ -1957,7 +1949,7 @@ getCommand =
                     (const "invalid source-repository")
                     (fmap (toFlag . Just) parsec)
                 )
-                ("", Flag Nothing)
+                (Flag Nothing)
                 (map (fmap show) . flagToList)
             )
         , option
@@ -2055,13 +2047,6 @@ unpackCommand =
   where
     synopsis = "Deprecated alias for 'get'."
 
-instance Monoid GetFlags where
-  mempty = gmempty
-  mappend = (<>)
-
-instance Semigroup GetFlags where
-  (<>) = gmappend
-
 -- ------------------------------------------------------------
 
 -- * List flags
@@ -2077,6 +2062,7 @@ data ListFlags = ListFlags
   , listHcPath :: Flag FilePath
   }
   deriving (Generic)
+  deriving (Semigroup, Monoid) via Generically ListFlags
 
 defaultListFlags :: ListFlags
 defaultListFlags =
@@ -2157,7 +2143,7 @@ listOptions =
   , option
       "w"
       ["with-compiler"]
-      "give the path to a particular compiler"
+      "Give the path to a particular compiler"
       listHcPath
       (\v flags -> flags{listHcPath = v})
       (reqArgFlag "PATH")
@@ -2167,13 +2153,6 @@ listNeedsCompiler :: ListFlags -> Bool
 listNeedsCompiler f =
   flagElim False (const True) (listHcPath f)
     || fromFlagOrDefault False (listInstalled f)
-
-instance Monoid ListFlags where
-  mempty = gmempty
-  mappend = (<>)
-
-instance Semigroup ListFlags where
-  (<>) = gmappend
 
 -- ------------------------------------------------------------
 
@@ -2186,6 +2165,7 @@ data InfoFlags = InfoFlags
   , infoPackageDBs :: [Maybe PackageDB]
   }
   deriving (Generic)
+  deriving (Semigroup, Monoid) via Generically InfoFlags
 
 defaultInfoFlags :: InfoFlags
 defaultInfoFlags =
@@ -2224,13 +2204,6 @@ infoCommand =
         ]
     }
 
-instance Monoid InfoFlags where
-  mempty = gmempty
-  mappend = (<>)
-
-instance Semigroup InfoFlags where
-  (<>) = gmappend
-
 -- ------------------------------------------------------------
 
 -- * Install flags
@@ -2250,7 +2223,7 @@ data InstallFlags = InstallFlags
   , installFineGrainedConflicts :: Flag FineGrainedConflicts
   , installMinimizeConflictSet :: Flag MinimizeConflictSet
   , installIndependentGoals :: Flag IndependentGoals
-  , installPreferOldest :: Flag PreferOldest
+  , installPreferVersion :: Flag PreferVersion
   , installShadowPkgs :: Flag ShadowPkgs
   , installStrongFlags :: Flag StrongFlags
   , installAllowBootLibInstalls :: Flag AllowBootLibInstalls
@@ -2276,8 +2249,10 @@ data InstallFlags = InstallFlags
   , installKeepGoing :: Flag Bool
   , installRunTests :: Flag Bool
   , installOfflineMode :: Flag Bool
+  , installBuildTimings :: Flag Bool
   }
   deriving (Eq, Show, Generic)
+  deriving (Semigroup, Monoid) via Generically InstallFlags
 
 instance Binary InstallFlags
 
@@ -2295,7 +2270,7 @@ defaultInstallFlags =
     , installFineGrainedConflicts = Flag (FineGrainedConflicts True)
     , installMinimizeConflictSet = Flag (MinimizeConflictSet False)
     , installIndependentGoals = Flag (IndependentGoals False)
-    , installPreferOldest = Flag (PreferOldest False)
+    , installPreferVersion = Flag PreferInstalledOrLatest
     , installShadowPkgs = Flag (ShadowPkgs False)
     , installStrongFlags = Flag (StrongFlags False)
     , installAllowBootLibInstalls = Flag (AllowBootLibInstalls False)
@@ -2319,6 +2294,7 @@ defaultInstallFlags =
     , installKeepGoing = Flag False
     , installRunTests = mempty
     , installOfflineMode = Flag False
+    , installBuildTimings = Flag False
     }
   where
     docIndexFile =
@@ -2403,7 +2379,7 @@ installCommand =
           ++ pname
           ++ " v1-install haddock --bindir=$HOME/hask-bin/ --datadir=$HOME/hask-data/\n"
           ++ "  "
-          ++ (map (const ' ') pname)
+          ++ map (const ' ') pname
           ++ "                         "
           ++ "    Change installation destination\n"
     , commandDefaultFlags = (mempty, mempty, mempty, mempty, mempty, mempty)
@@ -2637,7 +2613,7 @@ installOptions showOrParseArgs =
       ( reqArg
           "DATABASE"
           (succeedReadE (Flag . Cabal.CopyToDb))
-          (\f -> case f of Flag (Cabal.CopyToDb p) -> [p]; _ -> [])
+          (\case Flag (Cabal.CopyToDb p) -> [p]; _ -> [])
       )
   ]
     ++ optionSolverFlags
@@ -2654,8 +2630,8 @@ installOptions showOrParseArgs =
       (\v flags -> flags{installMinimizeConflictSet = v})
       installIndependentGoals
       (\v flags -> flags{installIndependentGoals = v})
-      installPreferOldest
-      (\v flags -> flags{installPreferOldest = v})
+      installPreferVersion
+      (\v flags -> flags{installPreferVersion = v})
       installShadowPkgs
       (\v flags -> flags{installShadowPkgs = v})
       installStrongFlags
@@ -2822,6 +2798,13 @@ installOptions showOrParseArgs =
           installOfflineMode
           (\v flags -> flags{installOfflineMode = v})
           (yesNoOpt showOrParseArgs)
+       , option
+          []
+          ["build-timings"]
+          "Print elapsed time for each build phase."
+          installBuildTimings
+          (\v flags -> flags{installBuildTimings = v})
+          (yesNoOpt showOrParseArgs)
        ]
     ++ case showOrParseArgs of -- TODO: remove when "cabal install"
     -- avoids
@@ -2850,7 +2833,7 @@ optionNumJobs get set =
     ( optArg
         "NUM"
         (fmap Flag numJobsParser)
-        ("", Flag Nothing)
+        (Flag Nothing)
         (map (Just . maybe "$ncpus" show) . flagToList)
     )
   where
@@ -2863,13 +2846,6 @@ optionNumJobs get set =
             | n < 1 -> Left "The number of jobs should be 1 or more."
             | otherwise -> Right (Just n)
           _ -> Left "The jobs value should be a number or '$ncpus'"
-
-instance Monoid InstallFlags where
-  mempty = gmempty
-  mappend = (<>)
-
-instance Semigroup InstallFlags where
-  (<>) = gmappend
 
 -- ------------------------------------------------------------
 
@@ -2885,6 +2861,7 @@ data UploadFlags = UploadFlags
   { uploadCandidate :: Flag IsCandidate
   , uploadDoc :: Flag Bool
   , uploadToken :: Flag Token
+  , uploadTokenCmd :: Flag [String]
   , uploadUsername :: Flag Username
   , uploadPassword :: Flag Password
   , uploadPasswordCmd :: Flag [String]
@@ -2892,6 +2869,7 @@ data UploadFlags = UploadFlags
   , uploadRepoName :: Flag RepoName
   }
   deriving (Generic)
+  deriving (Semigroup, Monoid) via Generically UploadFlags
 
 defaultUploadFlags :: UploadFlags
 defaultUploadFlags =
@@ -2899,6 +2877,7 @@ defaultUploadFlags =
     { uploadCandidate = toFlag IsCandidate
     , uploadDoc = toFlag False
     , uploadToken = mempty
+    , uploadTokenCmd = mempty
     , uploadUsername = mempty
     , uploadPassword = mempty
     , uploadPasswordCmd = mempty
@@ -2915,7 +2894,7 @@ uploadCommand =
     , commandNotes = Just $ \_ ->
         "You can store your Hackage login in the ~/.config/cabal/config file\n"
           ++ "(the %APPDATA%\\cabal\\config file on Windows)\n"
-          ++ relevantConfigValuesText ["token", "username", "password", "password-command"]
+          ++ relevantConfigValuesText ["token", "token-command", "username", "password", "password-command"]
     , commandUsage = \pname ->
         "Usage: " ++ pname ++ " upload [FLAGS] TARFILES\n"
     , commandDefaultFlags = defaultUploadFlags
@@ -2951,6 +2930,20 @@ uploadCommand =
                 "TOKEN"
                 (toFlag . Token)
                 (flagToList . fmap unToken)
+            )
+        , option
+            ['T']
+            ["token-command"]
+            "Command to get Hackage authentication token."
+            uploadTokenCmd
+            (\v flags -> flags{uploadTokenCmd = v})
+            ( reqArg
+                "COMMAND"
+                ( readP_to_E
+                    ("Cannot parse command: " ++)
+                    (Flag <$> parseSpaceList parseTokenQ)
+                )
+                (flagElim [] (pure . unwords . fmap show))
             )
         , option
             ['u']
@@ -2998,13 +2991,6 @@ uploadCommand =
         ]
     }
 
-instance Monoid UploadFlags where
-  mempty = gmempty
-  mappend = (<>)
-
-instance Semigroup UploadFlags where
-  (<>) = gmappend
-
 -- ------------------------------------------------------------
 
 -- * Init flags
@@ -3020,12 +3006,12 @@ initCommand =
         wrapText $
           "Create a .cabal, CHANGELOG.md, minimal initial Haskell code and optionally a LICENSE file.\n"
             ++ "\n"
-            ++ "Calling init with no arguments runs interactive mode, "
+            ++ "Calling init with no arguments runs interactive mode by default, "
             ++ "which will try to guess as much as possible and prompt you for the rest.\n"
             ++ "Non-interactive mode can be invoked by the -n/--non-interactive flag, "
-            ++ "which will let you specify the options via flags and will use the defaults for the rest.\n"
-            ++ "It is also possible to call init with a single argument, which denotes the project's desired "
-            ++ "root directory.\n"
+            ++ "which will let you specify the options via flags and will either use the defaults for the rest, "
+            ++ "or attempt to infer sensible defaults from your local development environment (e.g. $PATH).\n"
+            ++ "For a basic simple project with minimal prompting and sensible defaults, issue the --simple flag.\n"
     , commandNotes = Nothing
     , commandUsage = \pname ->
         "Usage: " ++ pname ++ " init [PROJECT ROOT] [FLAGS]\n"
@@ -3038,7 +3024,10 @@ initOptions _ =
   [ option
       ['i']
       ["interactive"]
-      "interactive mode."
+      ( "Interactive mode. Creates a prompt tree for project creation. \n"
+          ++ "If -n/--non-interactive is issued, a simple project with inferred defaults \n"
+          ++ "is created. If --simple is issued, then sensible defaults will be chosen as well."
+      )
       IT.interactive
       (\v flags -> flags{IT.interactive = v})
       (boolOpt' (['i'], ["interactive"]) (['n'], ["non-interactive"]))
@@ -3360,7 +3349,7 @@ initOptions _ =
   , option
       "w"
       ["with-compiler"]
-      "give the path to a particular compiler. For 'init', this flag is used \
+      "Give the path to a particular compiler. For 'init', this flag is used \
       \to set the bounds inferred for the 'base' package."
       IT.initHcPath
       (\v flags -> flags{IT.initHcPath = v})
@@ -3446,6 +3435,7 @@ data ActAsSetupFlags = ActAsSetupFlags
   { actAsSetupBuildType :: Flag BuildType
   }
   deriving (Generic)
+  deriving (Semigroup, Monoid) via Generically ActAsSetupFlags
 
 defaultActAsSetupFlags :: ActAsSetupFlags
 defaultActAsSetupFlags =
@@ -3481,13 +3471,6 @@ actAsSetupCommand =
         ]
     }
 
-instance Monoid ActAsSetupFlags where
-  mempty = gmempty
-  mappend = (<>)
-
-instance Semigroup ActAsSetupFlags where
-  (<>) = gmappend
-
 -- ------------------------------------------------------------
 
 -- * UserConfig flags
@@ -3500,6 +3483,7 @@ data UserConfigFlags = UserConfigFlags
   , userConfigAppendLines :: Flag [String]
   }
   deriving (Generic)
+  deriving (Semigroup) via Generically UserConfigFlags
 
 instance Monoid UserConfigFlags where
   mempty =
@@ -3508,10 +3492,6 @@ instance Monoid UserConfigFlags where
       , userConfigForce = toFlag False
       , userConfigAppendLines = toFlag []
       }
-  mappend = (<>)
-
-instance Semigroup UserConfigFlags where
-  (<>) = gmappend
 
 userConfigCommand :: CommandUI UserConfigFlags
 userConfigCommand =
@@ -3617,8 +3597,8 @@ optionSolverFlags
   -> (Flag MinimizeConflictSet -> flags -> flags)
   -> (flags -> Flag IndependentGoals)
   -> (Flag IndependentGoals -> flags -> flags)
-  -> (flags -> Flag PreferOldest)
-  -> (Flag PreferOldest -> flags -> flags)
+  -> (flags -> Flag PreferVersion)
+  -> (Flag PreferVersion -> flags -> flags)
   -> (flags -> Flag ShadowPkgs)
   -> (Flag ShadowPkgs -> flags -> flags)
   -> (flags -> Flag StrongFlags)
@@ -3705,9 +3685,23 @@ optionSolverFlags
         []
         ["prefer-oldest"]
         "Prefer the oldest (instead of the latest) versions of packages available. Useful to determine lower bounds in the build-depends section."
-        (fmap asBool . getpo)
-        (setpo . fmap PreferOldest)
+        ((\x -> if x == Flag PreferOldest then Flag True else NoFlag) . getpo)
+        (setpo . ($> PreferOldest))
         (yesNoOpt showOrParseArgs)
+    , option
+        []
+        ["prefer-version"]
+        "Select which version of a package that the solver should prefer. Oldest is useful to determine lower bounds in build-depends section. Latest will prefer the latest version. Installed-or-latest will prefer installed versions and the latest version otherwise."
+        getpo
+        setpo
+        ( reqArg
+            "oldest|latest|installed-or-latest"
+            ( parsecToReadE
+                (\err -> "Error parsing prefer-version: " ++ err)
+                (toFlag `fmap` parsec)
+            )
+            (flagToList . fmap prettyShow)
+        )
     , option
         []
         ["shadow-installed-packages"]

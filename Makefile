@@ -49,6 +49,15 @@ FORMAT_DIRS_TODO := \
 	cabal-testsuite/static \
 	solver-benchmarks
 
+.PHONY: check
+check:
+	@cd Cabal && cabal check | grep -q "No errors or warnings could be found in the package."
+	@cd cabal-install && cabal check | grep -q "No errors or warnings could be found in the package."
+	@cd Cabal-syntax && cabal check | grep -q "No errors or warnings could be found in the package."
+	@cd Cabal-hooks && cabal check | grep -q "No errors or warnings could be found in the package."
+	@cd hooks-exe && cabal check | grep -q "No errors or warnings could be found in the package."
+	@cd cabal-install-solver && cabal check | grep -q "No errors or warnings could be found in the package."
+
 .PHONY: style-todo
 style-todo: ## Configured for fourmolu, avoiding GHC parser failures.
 	@fourmolu -q $(FORMAT_DIRS_TODO) > /dev/null
@@ -99,7 +108,7 @@ SPDX_EXCEPTION_HS:=Cabal-syntax/src/Distribution/SPDX/LicenseExceptionId.hs
 .PHONY: spdx
 spdx : $(SPDX_LICENSE_HS) $(SPDX_EXCEPTION_HS)
 
-SPDX_LICENSE_VERSIONS:=3.0 3.2 3.6 3.9 3.10 3.16 3.23 3.25 3.26
+SPDX_LICENSE_VERSIONS:=3.0 3.2 3.6 3.9 3.10 3.16 3.23 3.25 3.26 3.28
 
 $(SPDX_LICENSE_HS) : templates/SPDX.LicenseId.template.hs cabal-dev-scripts/src/GenUtils.hs cabal-dev-scripts/src/GenSPDX.hs license-list-data/licenses-3.0.json license-list-data/licenses-3.2.json
 	cabal run --builddir=dist-newstyle-meta --project-file=cabal.meta.project gen-spdx -- templates/SPDX.LicenseId.template.hs $(SPDX_LICENSE_VERSIONS:%=license-list-data/licenses-%.json) $(SPDX_LICENSE_HS)
@@ -151,20 +160,21 @@ ghcid-cli: ## Run ghcid for the cabal-install executable.
 
 .PHONY: doctest
 doctest: ## Run doctests.
+	cabal --numeric-version
 	cd Cabal-syntax && $(DOCTEST)
 	cd Cabal-described && $(DOCTEST)
 	cd Cabal && $(DOCTEST)
 	cd cabal-install-solver && $(DOCTEST)
 	cd cabal-install && $(DOCTEST)
 
-# This is not run as part of validate.sh (we need hackage-security, which is tricky to get).
-.PHONY: doctest-cli
-doctest-cli :
-	doctest -D__DOCTEST__ --fast cabal-install/src cabal-install-solver/src cabal-install-solver/src-assertion
-
+# If we pin and periodically bump the version of doctest, we get more
+# reproducible testing. Initially we pinned to doctest-0.25.0 to avoid failures
+# with doctest-0.24.3 but `cabal install doctest` depends on index state that
+# itself gets bumped when `cabal update --ignore-project` is run.
+# SEE: https://github.com/haskell/cabal/issues/11493#issuecomment-4615438425
 .PHONY: doctest-install
 doctest-install: ## Install doctest tool needed for running doctests.
-	cabal install doctest --overwrite-policy=always --ignore-project --flag cabal-doctest
+	cabal install doctest-0.25.0 --overwrite-policy=always --ignore-project --flag cabal-doctest
 
 # tests
 
@@ -284,7 +294,7 @@ bootstrap-subr-%: phony
 	cd bootstrap && $(CABALCONF) $(CABALRUN) -v0 cabal-bootstrap-gen -- linux-$*.plan.json \
 		| python3 -m json.tool > linux-$*.json
 
-BOOTSTRAP_GHC_VERSIONS := 9.2.8 9.4.8 9.6.7 9.8.4 9.10.3 9.12.2
+BOOTSTRAP_GHC_VERSIONS := 9.6.7 9.8.4 9.10.3 9.12.4
 
 .PHONY: bootstrap-jsons
 bootstrap-jsons: ## Generate bootstrap JSONs for Linux (autodetects method).
@@ -362,7 +372,7 @@ users-guide-typos: ## Find typos in users guide.
 
 .PHONY: users-guide-fix-typos
 users-guide-fix-typos: ## Fix typos in users guide.
-	cd doc && $(FIND_NAMED) '*.rst' | xargs typos --config ../.typos-docs.toml --write-changes --force-exclude 
+	cd doc && $(FIND_NAMED) '*.rst' | xargs typos --config ../.typos-docs.toml --write-changes --force-exclude
 
 .PHONY: markdown-typos
 markdown-typos: ## Find typos in markdown files.

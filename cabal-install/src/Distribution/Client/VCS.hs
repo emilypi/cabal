@@ -1,8 +1,5 @@
 {-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE NamedFieldPuns #-}
-{-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE RecordWildCards #-}
-{-# LANGUAGE ScopedTypeVariables #-}
 
 module Distribution.Client.VCS
   ( -- * VCS driver type
@@ -502,13 +499,20 @@ vcsGit =
       gitProg
       ((primaryRepo, primaryLocalDir) : secondaryRepos) = do
         vcsSyncRepo verbosity gitProg primaryRepo primaryLocalDir Nothing
+        -- Each of the `secondaryRepos` clones the primary checkout as
+        -- `git clone --reference`, so that the group shares one object store.
+        -- But git refuses to reference a shallow clone, so only pass it on
+        -- when git's own marker `.git/shallow` is absent.
+        -- Fixes #12296.
+        primaryIsShallow <- doesFileExist (primaryLocalDir </> ".git" </> "shallow")
+        let peer = if primaryIsShallow then Nothing else Just primaryLocalDir
         sequence_
-          [ vcsSyncRepo verbosity gitProg repo localDir (Just primaryLocalDir)
+          [ vcsSyncRepo verbosity gitProg repo localDir peer
           | (repo, localDir) <- secondaryRepos
           ]
         return
           [ monitorDirectoryExistence dir
-          | dir <- (primaryLocalDir : map snd secondaryRepos)
+          | dir <- primaryLocalDir : map snd secondaryRepos
           ]
 
     -- NOTE: Repositories are cloned once, but can be synchronized multiple times.
@@ -684,7 +688,7 @@ vcsHg =
           ]
         return
           [ monitorDirectoryExistence dir
-          | dir <- (primaryLocalDir : map snd secondaryRepos)
+          | dir <- primaryLocalDir : map snd secondaryRepos
           ]
     vcsSyncRepo verbosity hgProg repo localDir = do
       exists <- doesDirectoryExist localDir
@@ -700,7 +704,7 @@ vcsHg =
               { progInvokeCwd = Just cwd
               }
         cloneArgs =
-          ["clone", "--noupdate", (srpLocation repo), localDir]
+          ["clone", "--noupdate", srpLocation repo, localDir]
             ++ verboseArg
         verboseArg = ["--quiet" | verbosityLevel verbosity < Verbosity.Normal]
         checkoutArgs =
@@ -878,7 +882,7 @@ vcsPijul =
           ]
         return
           [ monitorDirectoryExistence dir
-          | dir <- (primaryLocalDir : map snd secondaryRepos)
+          | dir <- primaryLocalDir : map snd secondaryRepos
           ]
 
     vcsSyncRepo verbosity pijulProg SourceRepositoryPackage{..} localDir peer = do

@@ -37,6 +37,7 @@ import Distribution.Simple.Command
   , ShowOrParseArgs
   , liftOptionL
   , option
+  , usageAlternatives
   )
 import Distribution.Simple.Setup
   ( Flag
@@ -81,6 +82,7 @@ import Control.Monad
   , mapM
   )
 import qualified Data.Set as Set
+import qualified GHC.IO.Exception as GHC
 import System.Directory
   ( canonicalizePath
   , doesDirectoryExist
@@ -92,7 +94,8 @@ import System.FilePath
   ( (</>)
   )
 import System.IO.Error
-  ( isPermissionError
+  ( ioeGetErrorType
+  , isPermissionError
   )
 import qualified System.Process as Process
 
@@ -116,8 +119,7 @@ cleanCommand =
   CommandUI
     { commandName = "v2-clean"
     , commandSynopsis = "Clean the package store and remove temporary files."
-    , commandUsage = \pname ->
-        "Usage: " ++ pname ++ " new-clean [FLAGS]\n"
+    , commandUsage = usageAlternatives "v2-clean" ["[FLAGS]"]
     , commandDescription = Just $ \_ ->
         wrapText $
           "Removes all temporary files created during the building process "
@@ -154,7 +156,7 @@ cleanAction :: (ProjectFlags, CleanFlags) -> [String] -> GlobalFlags -> IO ()
 cleanAction (ProjectFlags{..}, CleanFlags{..}) extraArgs _ = do
   let verbosity = mkVerbosity defaultVerbosityHandles $ fromFlagOrDefault normal cleanVerbosity
       saveConfig = fromFlagOrDefault False cleanSaveConfig
-      mdistDirectory = fmap getSymbolicPath $ flagToMaybe cleanDistDir
+      mdistDirectory = getSymbolicPath <$> flagToMaybe cleanDistDir
       mprojectDir = flagToMaybe flagProjectDir
       mprojectFile = flagToMaybe flagProjectFile
 
@@ -193,7 +195,14 @@ cleanAction (ProjectFlags{..}, CleanFlags{..}) extraArgs _ = do
                 "attrib -s -h -r " <> distRoot <> "\\*.* /s /d"
         catch
           (removePathForcibly distRoot)
-          (\e -> if isPermissionError e then threadDelay 1000 >> removePathForcibly distRoot else throw e)
+          ( \e ->
+              -- Permission error is usually when some files are (temporarily) locked.
+              -- Unsatisfied constraints (directory is non empty) error happens
+              -- when some files inside the directory were not removed (perhaps because they are locked).
+              if isPermissionError e || ioeGetErrorType e == GHC.UnsatisfiedConstraints
+                then threadDelay 1000 >> removePathForcibly distRoot
+                else throw e
+          )
 
     removeEnvFiles $ distProjectRootDirectory distLayout
 

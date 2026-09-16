@@ -1,10 +1,6 @@
-{-# LANGUAGE DataKinds #-}
-{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE DerivingVia #-}
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE PatternSynonyms #-}
-
------------------------------------------------------------------------------
-
------------------------------------------------------------------------------
 
 -- |
 -- Module      :  Distribution.Client.Config
@@ -114,6 +110,7 @@ import Distribution.Utils.NubList
   )
 
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Lazy as LBS
 import qualified Data.Map as M
 import Distribution.Client.Errors
 import Distribution.Client.HttpUtils
@@ -137,7 +134,6 @@ import Distribution.Compiler
 import Distribution.Deprecated.ParseUtils
   ( FieldDescr (..)
   , PError (..)
-  , PWarning (..)
   , ParseResult (..)
   , liftField
   , lineNo
@@ -208,6 +204,7 @@ import Distribution.Simple.Utils
   , notice
   , toUTF8BS
   , warn
+  , writeFileAtomic
   )
 import Distribution.Solver.Types.ConstraintSource
 import Distribution.Utils.Path (getSymbolicPath, unsafeMakeSymbolicPath)
@@ -233,7 +230,6 @@ import System.Directory
 import System.FilePath
   ( normalise
   , takeDirectory
-  , (<.>)
   , (</>)
   )
 import System.IO.Error
@@ -276,10 +272,7 @@ data SavedConfig = SavedConfig
   , savedReplMulti :: Flag Bool
   }
   deriving (Generic)
-
-instance Monoid SavedConfig where
-  mempty = gmempty
-  mappend = (<>)
+  deriving (Monoid) via Generically SavedConfig
 
 instance Semigroup SavedConfig where
   a <> b =
@@ -301,7 +294,7 @@ instance Semigroup SavedConfig where
       , savedReplMulti = combinedSavedReplMulti
       }
     where
-      -- This is ugly, but necessary. If we're mappending two config files, we
+      -- This is ugly, but necessary. If we're combining two config files, we
       -- want the values of the *non-empty* list fields from the second one to
       -- \*override* the corresponding values from the first one. Default
       -- behaviour (concatenation) is confusing and makes some use cases (see
@@ -320,7 +313,7 @@ instance Semigroup SavedConfig where
       -- NB: the signature prevents us from using 'combine' on lists.
       combine' :: (SavedConfig -> flags) -> (flags -> Flag a) -> Flag a
       combine' field subfield =
-        (subfield . field $ a) `mappend` (subfield . field $ b)
+        subfield (field a) <> subfield (field b)
 
       combineMonoid
         :: Monoid mon
@@ -328,7 +321,7 @@ instance Semigroup SavedConfig where
         -> (flags -> mon)
         -> mon
       combineMonoid field subfield =
-        (subfield . field $ a) `mappend` (subfield . field $ b)
+        subfield (field a) <> subfield (field b)
 
       lastNonEmpty' :: (SavedConfig -> flags) -> (flags -> [a]) -> [a]
       lastNonEmpty' field subfield =
@@ -428,7 +421,7 @@ instance Semigroup SavedConfig where
           , installFineGrainedConflicts = combine installFineGrainedConflicts
           , installMinimizeConflictSet = combine installMinimizeConflictSet
           , installIndependentGoals = combine installIndependentGoals
-          , installPreferOldest = combine installPreferOldest
+          , installPreferVersion = combine installPreferVersion
           , installShadowPkgs = combine installShadowPkgs
           , installStrongFlags = combine installStrongFlags
           , installAllowBootLibInstalls = combine installAllowBootLibInstalls
@@ -452,6 +445,7 @@ instance Semigroup SavedConfig where
           , installKeepGoing = combine installKeepGoing
           , installRunTests = combine installRunTests
           , installOfflineMode = combine installOfflineMode
+          , installBuildTimings = combine installBuildTimings
           }
         where
           combine = combine' savedInstallFlags
@@ -511,10 +505,9 @@ instance Semigroup SavedConfig where
           , configDebugInfo = combine configDebugInfo
           , configProgPrefix = combine configProgPrefix
           , configProgSuffix = combine configProgSuffix
-          , -- Parametrised by (Flag PathTemplate), so safe to use 'mappend'.
+          , -- Parametrised by (Flag PathTemplate), so safe to use '(<>)'.
             configInstallDirs =
-              (configInstallDirs . savedConfigureFlags $ a)
-                `mappend` (configInstallDirs . savedConfigureFlags $ b)
+              configInstallDirs (savedConfigureFlags a) <> configInstallDirs (savedConfigureFlags b)
           , configScratchDir = combine configScratchDir
           , -- TODO: NubListify
             configExtraLibDirs = lastNonEmpty configExtraLibDirs
@@ -583,21 +576,20 @@ instance Semigroup SavedConfig where
           combine = combine' savedConfigureExFlags
           lastNonEmpty = lastNonEmpty' savedConfigureExFlags
 
-      -- Parametrised by (Flag PathTemplate), so safe to use 'mappend'.
+      -- Parametrised by (Flag PathTemplate), so safe to use '(<>)'.
       combinedSavedUserInstallDirs =
-        savedUserInstallDirs a
-          `mappend` savedUserInstallDirs b
+        savedUserInstallDirs a <> savedUserInstallDirs b
 
-      -- Parametrised by (Flag PathTemplate), so safe to use 'mappend'.
+      -- Parametrised by (Flag PathTemplate), so safe to use '(<>)'.
       combinedSavedGlobalInstallDirs =
-        savedGlobalInstallDirs a
-          `mappend` savedGlobalInstallDirs b
+        savedGlobalInstallDirs a <> savedGlobalInstallDirs b
 
       combinedSavedUploadFlags =
         UploadFlags
           { uploadCandidate = combine uploadCandidate
           , uploadDoc = combine uploadDoc
           , uploadToken = combine uploadToken
+          , uploadTokenCmd = combine uploadTokenCmd
           , uploadUsername = combine uploadUsername
           , uploadPassword = combine uploadPassword
           , uploadPasswordCmd = combine uploadPasswordCmd
@@ -963,7 +955,7 @@ loadConfig verbosity configFileFlag = do
 extendToEffectiveConfig :: SavedConfig -> IO SavedConfig
 extendToEffectiveConfig config = do
   base <- baseSavedConfig
-  let effective0 = base `mappend` config
+  let effective0 = base <> config
       globalFlags0 = savedGlobalFlags effective0
       effective =
         effective0
@@ -1027,7 +1019,7 @@ data ConfigFileSource
 -- | Returns the config file path, without checking that the file exists.
 -- The order of precedence is: input flag, CABAL_CONFIG, default location.
 getConfigFilePath :: Verbosity -> Flag FilePath -> IO FilePath
-getConfigFilePath verbosity configFilePath = fmap snd $ getConfigFilePathAndSource verbosity configFilePath
+getConfigFilePath verbosity configFilePath = snd <$> getConfigFilePathAndSource verbosity configFilePath
 
 getConfigFilePathAndSource :: Verbosity -> Flag FilePath -> IO (ConfigFileSource, FilePath)
 getConfigFilePathAndSource verbosity configFileFlag =
@@ -1046,7 +1038,7 @@ getConfigFilePathAndSource verbosity configFileFlag =
 
     sources =
       [ (CommandlineOption, return . flagToMaybe $ configFileFlag)
-      , (EnvironmentVariable, lookup "CABAL_CONFIG" `liftM` getEnvironment)
+      , (EnvironmentVariable, lookup "CABAL_CONFIG" <$> getEnvironment)
       , (Default, defaultSource)
       ]
 
@@ -1073,16 +1065,15 @@ createDefaultConfigFile verbosity extraLines filePath = do
   initialConf <- initialSavedConfig
   extraConf <- parseExtraLines verbosity extraLines
   notice verbosity $ "Writing default configuration to " ++ filePath
-  writeConfigFile filePath commentConf (initialConf `mappend` extraConf)
+  writeConfigFile filePath commentConf (initialConf <> extraConf)
   return initialConf
 
 writeConfigFile :: FilePath -> SavedConfig -> SavedConfig -> IO ()
 writeConfigFile file comments vals = do
-  let tmpFile = file <.> "tmp"
   createDirectoryIfMissing True (takeDirectory file)
-  writeFile tmpFile $
-    explanation ++ showConfigWithComments comments vals ++ "\n"
-  renameFile tmpFile file
+  writeFileAtomic file $
+    LBS.fromStrict . toUTF8BS $
+      explanation ++ showConfigWithComments comments vals ++ "\n"
   where
     explanation =
       unlines
@@ -1203,7 +1194,7 @@ configFieldDescriptions src =
           $ let name = "optimization"
              in FieldDescr
                   name
-                  ( \f -> case f of
+                  ( \case
                       Flag NoOptimisation -> Disp.text "False"
                       Flag NormalOptimisation -> Disp.text "True"
                       Flag MaximumOptimisation -> Disp.text "2"
@@ -1211,30 +1202,20 @@ configFieldDescriptions src =
                   )
                   ( \line str _ -> case () of
                       _
-                        | str == "False" -> ParseOk [] (Flag NoOptimisation)
-                        | str == "True" -> ParseOk [] (Flag NormalOptimisation)
                         | str == "0" -> ParseOk [] (Flag NoOptimisation)
                         | str == "1" -> ParseOk [] (Flag NormalOptimisation)
                         | str == "2" -> ParseOk [] (Flag MaximumOptimisation)
-                        | lstr == "false" -> ParseOk [caseWarning] (Flag NoOptimisation)
-                        | lstr == "true" ->
-                            ParseOk
-                              [caseWarning]
-                              (Flag NormalOptimisation)
+                        | lstr == "false" -> ParseOk [] (Flag NoOptimisation)
+                        | lstr == "true" -> ParseOk [] (Flag NormalOptimisation)
                         | otherwise -> ParseFailed (NoParse name line)
                         where
                           lstr = lowercase str
-                          caseWarning =
-                            PWarning $
-                              "The '"
-                                ++ name
-                                ++ "' field is case sensitive, use 'True' or 'False'."
                   )
       , liftField configDebugInfo (\v flags -> flags{configDebugInfo = v}) $
           let name = "debug-info"
            in FieldDescr
                 name
-                ( \f -> case f of
+                ( \case
                     Flag NoDebugInfo -> Disp.text "False"
                     Flag MinimalDebugInfo -> Disp.text "1"
                     Flag NormalDebugInfo -> Disp.text "True"
@@ -1243,22 +1224,15 @@ configFieldDescriptions src =
                 )
                 ( \line str _ -> case () of
                     _
-                      | str == "False" -> ParseOk [] (Flag NoDebugInfo)
-                      | str == "True" -> ParseOk [] (Flag NormalDebugInfo)
                       | str == "0" -> ParseOk [] (Flag NoDebugInfo)
                       | str == "1" -> ParseOk [] (Flag MinimalDebugInfo)
                       | str == "2" -> ParseOk [] (Flag NormalDebugInfo)
                       | str == "3" -> ParseOk [] (Flag MaximalDebugInfo)
-                      | lstr == "false" -> ParseOk [caseWarning] (Flag NoDebugInfo)
-                      | lstr == "true" -> ParseOk [caseWarning] (Flag NormalDebugInfo)
+                      | lstr == "false" -> ParseOk [] (Flag NoDebugInfo)
+                      | lstr == "true" -> ParseOk [] (Flag NormalDebugInfo)
                       | otherwise -> ParseFailed (NoParse name line)
                       where
                         lstr = lowercase str
-                        caseWarning =
-                          PWarning $
-                            "The '"
-                              ++ name
-                              ++ "' field is case sensitive, use 'True' or 'False'."
                 )
       ]
     ++ toSavedConfig
@@ -1954,7 +1928,7 @@ userConfigDiff verbosity globalFlags extraLines = do
       M.unionWith
         combine
         (M.fromList . map justFst $ filterShow testConfig)
-        (M.fromList . map justSnd $ filterShow (userConfig `mappend` extraConfig))
+        (M.fromList . map justSnd $ filterShow (userConfig <> extraConfig))
   where
     justFst (a, b) = (a, (Just b, Nothing))
     justSnd (a, b) = (a, (Nothing, Just b))
@@ -2012,4 +1986,4 @@ userConfigUpdate verbosity globalFlags extraLines = do
   writeConfigFile
     cabalFile
     commentConf
-    (newConfig `mappend` userConfig `mappend` extraConfig)
+    (newConfig <> userConfig <> extraConfig)

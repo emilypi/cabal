@@ -1,9 +1,4 @@
 {-# LANGUAGE DataKinds #-}
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE PatternSynonyms #-}
-{-# LANGUAGE RankNTypes #-}
-
------------------------------------------------------------------------------
 
 -- |
 -- Module      :  Distribution.Simple.GHC.Internal
@@ -20,12 +15,8 @@ module Distribution.Simple.GHC.Internal
   , getExtensions
   , targetPlatform
   , getGhcInfo
-  , componentCcGhcOptions
-  , componentCmmGhcOptions
-  , componentCxxGhcOptions
-  , componentAsmGhcOptions
-  , componentJsGhcOptions
   , componentGhcOptions
+  , sourcesGhcOptions
   , mkGHCiLibName
   , mkGHCiProfLibName
   , filterGhciFlags
@@ -35,6 +26,11 @@ module Distribution.Simple.GHC.Internal
   , substTopDir
   , checkPackageDbEnvVar
   , profDetailLevelFlag
+  , ghcOptionsSince
+  , linkGhcOptions
+  , optimizationCFlags
+  , splitCandCxxOptions
+  , SplitSource (..)
 
     -- * GHC platform and version strings
   , ghcArchString
@@ -59,16 +55,14 @@ import qualified Data.Map as Map
 import qualified Data.Set as Set
 import Distribution.Backpack
 import Distribution.Compat.Stack
-import qualified Distribution.InstalledPackageInfo as IPI
 import Distribution.Lex
 import qualified Distribution.ModuleName as ModuleName
-import Distribution.PackageDescription
 import Distribution.Parsec (simpleParsec)
 import Distribution.Pretty (prettyShow)
 import Distribution.Simple.BuildPaths
 import Distribution.Simple.Compiler
 import Distribution.Simple.Errors
-import Distribution.Simple.Flag (Flag, maybeToFlag, toFlag, pattern NoFlag)
+import Distribution.Simple.Flag
 import Distribution.Simple.GHC.ImplInfo
 import Distribution.Simple.LocalBuildInfo
 import Distribution.Simple.Program
@@ -76,15 +70,20 @@ import Distribution.Simple.Program.GHC
 import Distribution.Simple.Setup.Common (extraCompilationArtifacts)
 import Distribution.Simple.Utils
 import Distribution.System
+import Distribution.Types.BuildInfo
 import Distribution.Types.ComponentLocalBuildInfo
 import Distribution.Types.GivenComponent
+import qualified Distribution.Types.InstalledPackageInfo as IPI
+import Distribution.Types.Library
 import Distribution.Types.LocalBuildInfo
+import Distribution.Types.ModuleRenaming
+import Distribution.Types.PackageName
 import Distribution.Types.TargetInfo
 import Distribution.Types.UnitId
+import Distribution.Types.Version
 import Distribution.Utils.NubList (NubListR, toNubListR)
 import Distribution.Utils.Path
 import Distribution.Verbosity
-import Distribution.Version (Version)
 import Language.Haskell.Extension
 import System.Directory (listDirectory)
 import System.Environment (getEnv)
@@ -180,7 +179,7 @@ configureToolchain _implInfo ghcProg ghcInfo =
     findProg progName extraPath v searchpath =
       findProgramOnSearchPath v searchpath' progName
       where
-        searchpath' = (map ProgramSearchPathDir extraPath) ++ searchpath
+        searchpath' = map ProgramSearchPathDir extraPath ++ searchpath
 
     -- Read tool locations from the 'ghc --info' output. Useful when
     -- cross-compiling.
@@ -192,10 +191,8 @@ configureToolchain _implInfo ghcProg ghcInfo =
 
     ccFlags = getFlags "C compiler flags"
     cxxFlags = getFlags "C++ compiler flags"
-    -- GHC 7.8 renamed "Gcc Linker flags" to "C compiler link flags"
-    -- and "Ld Linker flags" to "ld flags" (GHC #4862).
-    gccLinkerFlags = getFlags "Gcc Linker flags" ++ getFlags "C compiler link flags"
-    ldLinkerFlags = getFlags "Ld Linker flags" ++ getFlags "ld flags"
+    gccLinkerFlags = getFlags "C compiler link flags"
+    ldLinkerFlags = getFlags "ld flags"
 
     -- It appears that GHC 7.6 and earlier encode the tokenized flags as a
     -- [String] in these settings whereas later versions just encode the flags as
@@ -271,11 +268,9 @@ configureToolchain _implInfo ghcProg ghcInfo =
         else return ldProg
 
 getLanguages
-  :: Verbosity
-  -> GhcImplInfo
-  -> ConfiguredProgram
+  :: GhcImplInfo
   -> IO [(Language, String)]
-getLanguages _ implInfo _
+getLanguages implInfo
   -- TODO: should be using --supported-languages rather than hard coding
   | supportsGHC2024 implInfo =
       return
@@ -290,12 +285,11 @@ getLanguages _ implInfo _
         , (Haskell2010, "-XHaskell2010")
         , (Haskell98, "-XHaskell98")
         ]
-  | supportsHaskell2010 implInfo =
+  | otherwise =
       return
         [ (Haskell98, "-XHaskell98")
         , (Haskell2010, "-XHaskell2010")
         ]
-  | otherwise = return [(Haskell98, "")]
 
 getGhcInfo
   :: Verbosity
@@ -317,45 +311,18 @@ getGhcInfo verbosity _implInfo ghcProg = do
 
 getExtensions
   :: Verbosity
-  -> GhcImplInfo
   -> ConfiguredProgram
   -> IO [(Extension, Maybe String)]
-getExtensions verbosity implInfo ghcProg = do
+getExtensions verbosity ghcProg = do
   str <-
     getProgramOutput
       verbosity
       (suppressOverrideArgs ghcProg)
       ["--supported-languages"]
-  let extStrs =
-        if reportsNoExt implInfo
-          then lines str
-          else -- Older GHCs only gave us either Foo or NoFoo,
-          -- so we have to work out the other one ourselves
-
-            [ extStr''
-            | extStr <- lines str
-            , let extStr' = case extStr of
-                    'N' : 'o' : xs -> xs
-                    _ -> "No" ++ extStr
-            , extStr'' <- [extStr, extStr']
-            ]
-  let extensions0 =
-        [ (ext, Just $ "-X" ++ prettyShow ext)
-        | Just ext <- map simpleParsec extStrs
-        ]
-      extensions1 =
-        if alwaysNondecIndent implInfo
-          then -- ghc-7.2 split NondecreasingIndentation off
-          -- into a proper extension. Before that it
-          -- was always on.
-          -- Since it was not a proper extension, it could
-          -- not be turned off, hence we omit a
-          -- DisableExtension entry here.
-
-            (EnableExtension NondecreasingIndentation, Nothing)
-              : extensions0
-          else extensions0
-  return extensions1
+  return
+    [ (ext, Just $ "-X" ++ prettyShow ext)
+    | Just ext <- map simpleParsec $ lines str
+    ]
 
 includePaths
   :: LocalBuildInfo
@@ -377,7 +344,97 @@ includePaths lbi bi clbi odir =
          | dir <- mapMaybe (symbolicPathRelative_maybe . unsafeCoerceSymbolicPath) $ includeDirs bi
          ]
 
-componentCcGhcOptions
+data SplitSource = CcProgram | CxxProgram
+
+splitCandCxxOptions
+  :: SplitSource
+  -> VerbosityLevel
+  -> LocalBuildInfo
+  -> BuildInfo
+  -> ComponentLocalBuildInfo
+  -> SymbolicPath Pkg (Dir Artifacts)
+  -> SymbolicPath Pkg File
+  -> GhcOptions
+splitCandCxxOptions source verbosity lbi bi clbi odir filename = case source of
+  CxxProgram ->
+    -- For C++ sources: reset ccOptions for GHC < 8.10, because on those
+    -- old GHCs there's no -optcxx flag — all options go through -optc.
+    -- Without this reset, C-specific flags (ccOptions) would leak into
+    -- C++ compilation via -optc, which is wrong.
+    setGppProgram $ setCcOptions $ sourcesGhcOptions verbosity lbi bi clbi odir filename
+  CcProgram ->
+    -- For C sources: reset cxxOptions for GHC < 8.10, because on those
+    -- old GHCs there's no -optcxx flag — all options go through -optc.
+    -- Without this reset, C++-specific flags (cxxOptions) would leak into
+    -- C compilation via -optc, which is wrong.
+    setCcProgram $ setCxxOptions $ sourcesGhcOptions verbosity lbi bi clbi odir filename
+  where
+    setCcOptions xxx =
+      xxx
+        { -- C compiler options: GHC >= 8.10 requires -optcxx, older requires -optc
+          -- we want to be able to support cxx-options and cc-options separately
+          -- https://gitlab.haskell.org/ghc/ghc/-/issues/16477
+          -- see example in cabal-testsuite/PackageTests/FFI/ForeignOptsCxx
+          ghcOptCcOptions =
+            ghcOptionsSince
+              (mkVersion [8, 10])
+              (compiler lbi)
+              (optimizationCFlags lbi ++ ccOptions bi)
+        }
+    setCxxOptions xxx =
+      xxx
+        { -- C++ compiler options: GHC >= 8.10 requires -optcxx, older requires -optc
+          -- we want to be able to support cxx-options and cc-options separately
+          -- https://gitlab.haskell.org/ghc/ghc/-/issues/16477
+          -- see example in cabal-testsuite/PackageTests/FFI/ForeignOptsC
+          ghcOptCxxOptions =
+            ghcOptionsSince
+              (mkVersion [8, 10])
+              (compiler lbi)
+              (optimizationCFlags lbi ++ cxxOptions bi)
+        }
+    setCcProgram xxx =
+      xxx
+        { -- We pass -pgmc to ensure that GHC respects cc-options and ld-options (#4435, #9801).
+          -- However, we deliberately restrict this flag ONLY to C and C++ source files.
+          -- We do not pass it globally (e.g., during linking or ordinary Haskell compilation)
+          -- for two reasons:
+          -- 1. Status quo: This preserves Cabal's historical behavior.
+          -- 2. GHC < 9.4 bug (https://gitlab.haskell.org/ghc/ghc/-/issues/15319): Before GHC 9.4,
+          --    passing a custom C compiler via -pgmc caused GHC to automatically disable the
+          --    -no-pie flag (which is critical during linking on auto-hardened toolchains).
+          --    Passing -pgmc globally would therefore break linking on older GHCs.
+          --    https://gitlab.haskell.org/ghc/ghc/-/merge_requests/6949 fixed this by moving
+          --    the -no-pie check to -pgml, but scoping -pgmc exclusively to C/C++ compilation
+          --    protects older GHC versions from this link-time breakage.
+          -- see example in cabal-testsuite/PackageTests/FFI/ForeignOptsPgmc
+          ghcOptCcProgram = maybeToFlag $ programPath <$> lookupProgram gccProgram (withPrograms lbi)
+        }
+    setGppProgram xxx =
+      xxx
+        { -- We explicitly pass the C++ compiler via -pgmcxx because GHC >= 9.4
+          -- does not automatically detect it from the toolchain. Without this GHC
+          -- falls back to a gcc as a C++ compiler.
+          -- Related: #11805
+          ghcOptGppProgram =
+            ghcOptionsSince
+              (mkVersion [9, 4])
+              (compiler lbi)
+              (maybeToFlag $ programPath <$> lookupProgram gppProgram (withPrograms lbi))
+        , -- For GHC < 9.4, which does not support -pgmcxx, we fall back to
+          -- passing the C++ compiler via -pgmc. This ensures C++ sources are
+          -- compiled with the correct compiler even on older GHCs.
+          -- Note: we use gppProgram (C++ compiler), NOT gccProgram (C compiler),
+          -- because this path is specifically for C++ source files.
+          -- Related: #11805
+          ghcOptCcProgram =
+            ghcOptionsBefore
+              (mkVersion [9, 4])
+              (compiler lbi)
+              (maybeToFlag $ programPath <$> lookupProgram gppProgram (withPrograms lbi))
+        }
+
+sourcesGhcOptions
   :: VerbosityLevel
   -> LocalBuildInfo
   -> BuildInfo
@@ -385,134 +442,56 @@ componentCcGhcOptions
   -> SymbolicPath Pkg (Dir Artifacts)
   -> SymbolicPath Pkg File
   -> GhcOptions
-componentCcGhcOptions verbosity lbi bi clbi odir filename =
-  mempty
-    { -- Respect -v0, but don't crank up verbosity on GHC if
-      -- Cabal verbosity is requested. For that, use --ghc-option=-v instead!
-      ghcOptVerbosity = toFlag (min verbosity Normal)
+sourcesGhcOptions verbosity lbi bi clbi odir filename =
+  (componentGhcOptions verbosity lbi bi clbi odir)
+    { ghcOptVerbosity = toFlag (min verbosity Normal)
     , ghcOptMode = toFlag GhcModeCompile
     , ghcOptInputFiles = toNubListR [filename]
-    , ghcOptCppIncludePath = includePaths lbi bi clbi odir
-    , ghcOptHideAllPackages = toFlag True
-    , ghcOptPackageDBs = withPackageDB lbi
-    , ghcOptPackages = toNubListR $ mkGhcOptPackages (promisedPkgs lbi) clbi
-    , ghcOptCcOptions =
-        ( case withOptimization lbi of
-            NoOptimisation -> []
-            _ -> ["-O2"]
-        )
-          ++ ( case withDebugInfo lbi of
-                NoDebugInfo -> []
-                MinimalDebugInfo -> ["-g1"]
-                NormalDebugInfo -> ["-g"]
-                MaximalDebugInfo -> ["-g3"]
-             )
-          ++ ccOptions bi
-    , ghcOptCcProgram =
-        maybeToFlag $
-          programPath
-            <$> lookupProgram gccProgram (withPrograms lbi)
     , ghcOptObjDir = toFlag odir
-    , ghcOptExtra = hcOptions GHC bi
+    , ghcOptPackages = toNubListR $ mkGhcOptPackages (promisedPkgs lbi) clbi
+    , -- cpp-options apply only to .hs files; GHC ignores -optP for non-Haskell
+      -- files (and since 9.10 this behavior is explicit/enforced)
+      ghcOptCppOptions = []
     }
 
-componentCxxGhcOptions
-  :: VerbosityLevel
-  -> LocalBuildInfo
-  -> BuildInfo
-  -> ComponentLocalBuildInfo
-  -> SymbolicPath Pkg (Dir Artifacts)
-  -> SymbolicPath Pkg File
-  -> GhcOptions
-componentCxxGhcOptions verbosity lbi bi clbi odir filename =
-  mempty
-    { -- Respect -v0, but don't crank up verbosity on GHC if
-      -- Cabal verbosity is requested. For that, use --ghc-option=-v instead!
-      ghcOptVerbosity = toFlag (min verbosity Normal)
-    , ghcOptMode = toFlag GhcModeCompile
-    , ghcOptInputFiles = toNubListR [filename]
-    , ghcOptCppIncludePath = includePaths lbi bi clbi odir
-    , ghcOptHideAllPackages = toFlag True
-    , ghcOptPackageDBs = withPackageDB lbi
-    , ghcOptPackages = toNubListR $ mkGhcOptPackages (promisedPkgs lbi) clbi
-    , ghcOptCxxOptions =
-        ( case withOptimization lbi of
-            NoOptimisation -> []
-            _ -> ["-O2"]
-        )
-          ++ ( case withDebugInfo lbi of
-                NoDebugInfo -> []
-                MinimalDebugInfo -> ["-g1"]
-                NormalDebugInfo -> ["-g"]
-                MaximalDebugInfo -> ["-g3"]
-             )
-          ++ cxxOptions bi
-    , ghcOptCcProgram =
-        maybeToFlag $
-          programPath
-            <$> lookupProgram gccProgram (withPrograms lbi)
-    , ghcOptObjDir = toFlag odir
-    , ghcOptExtra = hcOptions GHC bi
-    }
+optimizationCFlags :: LocalBuildInfo -> [String]
+optimizationCFlags lbi =
+  ( case withOptimization lbi of
+      -- see --disable-optimization
+      NoOptimisation -> []
+      -- '*-options: -O[n]' is generally not needed. When building with
+      -- optimisations Cabal automatically adds '-O2' for * code. Setting it
+      -- yourself interferes with the --disable-optimization flag.
+      -- see https://github.com/haskell/cabal/pull/8250
+      NormalOptimisation -> ["-O2"]
+      -- see --enable-optimization
+      MaximumOptimisation -> ["-O2"]
+  )
+    ++ ( case withDebugInfo lbi of
+          NoDebugInfo -> []
+          MinimalDebugInfo -> ["-g1"]
+          NormalDebugInfo -> ["-g"]
+          MaximalDebugInfo -> ["-g3"]
+       )
 
-componentAsmGhcOptions
-  :: VerbosityLevel
-  -> LocalBuildInfo
-  -> BuildInfo
-  -> ComponentLocalBuildInfo
-  -> SymbolicPath Pkg (Dir Artifacts)
-  -> SymbolicPath Pkg File
-  -> GhcOptions
-componentAsmGhcOptions verbosity lbi bi clbi odir filename =
-  mempty
-    { -- Respect -v0, but don't crank up verbosity on GHC if
-      -- Cabal verbosity is requested. For that, use --ghc-option=-v instead!
-      ghcOptVerbosity = toFlag (min verbosity Normal)
-    , ghcOptMode = toFlag GhcModeCompile
-    , ghcOptInputFiles = toNubListR [filename]
-    , ghcOptCppIncludePath = includePaths lbi bi clbi odir
-    , ghcOptHideAllPackages = toFlag True
-    , ghcOptPackageDBs = withPackageDB lbi
-    , ghcOptPackages = toNubListR $ mkGhcOptPackages (promisedPkgs lbi) clbi
-    , ghcOptAsmOptions =
-        ( case withOptimization lbi of
-            NoOptimisation -> []
-            _ -> ["-O2"]
-        )
-          ++ ( case withDebugInfo lbi of
-                NoDebugInfo -> []
-                MinimalDebugInfo -> ["-g1"]
-                NormalDebugInfo -> ["-g"]
-                MaximalDebugInfo -> ["-g3"]
-             )
-          ++ asmOptions bi
-    , ghcOptObjDir = toFlag odir
-    , ghcOptExtra = hcOptions GHC bi
-    }
+-- Applies options only if the GHC version is greater than or
+-- equal to the given one.
+ghcOptionsSince :: Monoid a => Version -> Compiler -> a -> a
+ghcOptionsSince ver comp defOptions =
+  case compilerCompatVersion GHC comp of
+    Just v
+      | v >= ver -> defOptions
+      | otherwise -> mempty
+    Nothing -> mempty
 
-componentJsGhcOptions
-  :: VerbosityLevel
-  -> LocalBuildInfo
-  -> BuildInfo
-  -> ComponentLocalBuildInfo
-  -> SymbolicPath Pkg (Dir Artifacts)
-  -> SymbolicPath Pkg File
-  -> GhcOptions
-componentJsGhcOptions verbosity lbi bi clbi odir filename =
-  mempty
-    { -- Respect -v0, but don't crank up verbosity on GHC if
-      -- Cabal verbosity is requested. For that, use --ghc-option=-v instead!
-      ghcOptVerbosity = toFlag (min verbosity Normal)
-    , ghcOptMode = toFlag GhcModeCompile
-    , ghcOptInputFiles = toNubListR [filename]
-    , ghcOptJSppOptions = jsppOptions bi
-    , ghcOptCppIncludePath = includePaths lbi bi clbi odir
-    , ghcOptHideAllPackages = toFlag True
-    , ghcOptPackageDBs = withPackageDB lbi
-    , ghcOptPackages = toNubListR $ mkGhcOptPackages (promisedPkgs lbi) clbi
-    , ghcOptObjDir = toFlag odir
-    , ghcOptExtra = hcOptions GHC bi
-    }
+-- Applies options only if the GHC version is less than the given one.
+ghcOptionsBefore :: Monoid a => Version -> Compiler -> a -> a
+ghcOptionsBefore ver comp defOptions =
+  case compilerCompatVersion GHC comp of
+    Just v
+      | v < ver -> defOptions
+      | otherwise -> mempty
+    Nothing -> mempty
 
 componentGhcOptions
   :: VerbosityLevel
@@ -523,10 +502,41 @@ componentGhcOptions
   -> GhcOptions
 componentGhcOptions verbosity lbi bi clbi odir =
   let implInfo = getImplInfo $ compiler lbi
+   in (linkGhcOptions verbosity lbi bi clbi)
+        { ghcOptSourcePath =
+            toNubListR $
+              hsSourceDirs bi
+                ++ [coerceSymbolicPath odir]
+                ++ [autogenComponentModulesDir lbi clbi]
+                ++ [autogenPackageModulesDir lbi]
+        , ghcOptCppIncludePath = includePaths lbi bi clbi odir
+        , ghcOptObjDir = toFlag $ coerceSymbolicPath odir
+        , ghcOptHiDir = toFlag $ coerceSymbolicPath odir
+        , ghcOptHieDir = bool NoFlag (toFlag $ coerceSymbolicPath odir </> (extraCompilationArtifacts </> makeRelativePathEx "hie")) $ flagHie implInfo
+        , ghcOptStubDir = toFlag $ coerceSymbolicPath odir
+        , ghcOptOutputDir = toFlag $ coerceSymbolicPath odir
+        , ghcOptBytecodeDir = toFlag $ coerceSymbolicPath odir
+        }
+
+linkGhcOptions
+  :: VerbosityLevel
+  -> LocalBuildInfo
+  -> BuildInfo
+  -> ComponentLocalBuildInfo
+  -> GhcOptions
+linkGhcOptions verbosity lbi bi clbi =
+  let implInfo = getImplInfo $ compiler lbi
    in mempty
         { -- Respect -v0, but don't crank up verbosity on GHC if
           -- Cabal verbosity is requested. For that, use --ghc-option=-v instead!
           ghcOptVerbosity = toFlag (min verbosity Normal)
+        , ghcOptCcOptions = ccOptions bi
+        , ghcOptCxxOptions = cxxOptions bi
+        , ghcOptAsmOptions = asmOptions bi
+        , ghcOptLinkOptions = ldOptions bi
+        , ghcOptCppOptions = cppOptions bi
+        , ghcOptJSppOptions = jsppOptions bi
+        , ghcOptExtra = hcOptions GHC bi <> cmmOptions bi
         , ghcOptCabal = toFlag True
         , ghcOptThisUnitId = case clbi of
             LibComponentLocalBuildInfo{componentCompatPackageKey = pk} ->
@@ -561,32 +571,32 @@ componentGhcOptions verbosity lbi bi clbi odir =
         , ghcOptSplitSections = toFlag (splitSections lbi)
         , ghcOptSplitObjs = toFlag (splitObjs lbi)
         , ghcOptSourcePathClear = toFlag True
-        , ghcOptSourcePath =
-            toNubListR $
-              (hsSourceDirs bi)
-                ++ [coerceSymbolicPath odir]
-                ++ [autogenComponentModulesDir lbi clbi]
-                ++ [autogenPackageModulesDir lbi]
-        , ghcOptCppIncludePath = includePaths lbi bi clbi odir
-        , ghcOptCppOptions = cppOptions bi
-        , ghcOptJSppOptions = jsppOptions bi
         , ghcOptCppIncludes =
             toNubListR [coerceSymbolicPath (autogenComponentModulesDir lbi clbi </> makeRelativePathEx cppHeaderName)]
         , ghcOptFfiIncludes = toNubListR $ map getSymbolicPath $ includes bi
-        , ghcOptObjDir = toFlag $ coerceSymbolicPath odir
-        , ghcOptHiDir = toFlag $ coerceSymbolicPath odir
-        , ghcOptHieDir = bool NoFlag (toFlag $ coerceSymbolicPath odir </> (extraCompilationArtifacts </> makeRelativePathEx "hie")) $ flagHie implInfo
-        , ghcOptBytecodeDir = toFlag $ coerceSymbolicPath odir
-        , ghcOptStubDir = toFlag $ coerceSymbolicPath odir
-        , ghcOptOutputDir = toFlag $ coerceSymbolicPath odir
         , ghcOptOptimisation = toGhcOptimisation (withOptimization lbi)
         , ghcOptDebugInfo = toFlag (withDebugInfo lbi)
-        , ghcOptExtra = hcOptions GHC bi
         , ghcOptExtraPath = toNubListR exe_paths
         , ghcOptLanguage = toFlag (fromMaybe Haskell98 (defaultLanguage bi))
         , -- Unsupported extensions have already been checked by configure
           ghcOptExtensions = toNubListR $ usedExtensions bi
-        , ghcOptExtensionMap = Map.fromList . compilerExtensions $ (compiler lbi)
+        , ghcOptExtensionMap = Map.fromList . compilerExtensions $ compiler lbi
+        , -- Use -pgmc to ensure that Cabal always passes cc-options, ld-options to GHC (#4435, #9801)
+          -- We can only do this on GHC >= 9.4, as we need https://gitlab.haskell.org/ghc/ghc/-/merge_requests/6949
+          -- Without that GHC MR, this change would cause GHC to never pass -no-pie when linking,
+          -- which can cause breakage depending on the C toolchain use. We would have to appropriately
+          -- pass -pgmc-supports-no-pie as appropriate to avoid this regression.
+          ghcOptCcProgram =
+            ghcOptionsSince
+              (mkVersion [9, 4])
+              (compiler lbi)
+              (maybeToFlag $ programPath <$> lookupProgram gccProgram (withPrograms lbi))
+        , -- The assumption that the C++ compiler is part of the toolchain is only since ghc-9.4.
+          ghcOptGppProgram =
+            ghcOptionsSince
+              (mkVersion [9, 4])
+              (compiler lbi)
+              (maybeToFlag $ programPath <$> lookupProgram gppProgram (withPrograms lbi))
         }
   where
     exe_paths =
@@ -600,34 +610,6 @@ toGhcOptimisation :: OptimisationLevel -> Flag GhcOptimisation
 toGhcOptimisation NoOptimisation = mempty -- TODO perhaps override?
 toGhcOptimisation NormalOptimisation = toFlag GhcNormalOptimisation
 toGhcOptimisation MaximumOptimisation = toFlag GhcMaximumOptimisation
-
-componentCmmGhcOptions
-  :: VerbosityLevel
-  -> LocalBuildInfo
-  -> BuildInfo
-  -> ComponentLocalBuildInfo
-  -> SymbolicPath Pkg (Dir Artifacts)
-  -> SymbolicPath Pkg File
-  -> GhcOptions
-componentCmmGhcOptions verbosity lbi bi clbi odir filename =
-  mempty
-    { -- Respect -v0, but don't crank up verbosity on GHC if
-      -- Cabal verbosity is requested. For that, use --ghc-option=-v instead!
-      ghcOptVerbosity = toFlag (min verbosity Normal)
-    , ghcOptMode = toFlag GhcModeCompile
-    , ghcOptInputFiles = toNubListR [filename]
-    , ghcOptCppIncludePath = includePaths lbi bi clbi odir
-    , ghcOptCppOptions = cppOptions bi
-    , ghcOptCppIncludes =
-        toNubListR [autogenComponentModulesDir lbi clbi </> makeRelativePathEx cppHeaderName]
-    , ghcOptHideAllPackages = toFlag True
-    , ghcOptPackageDBs = withPackageDB lbi
-    , ghcOptPackages = toNubListR $ mkGhcOptPackages (promisedPkgs lbi) clbi
-    , ghcOptOptimisation = toGhcOptimisation (withOptimization lbi)
-    , ghcOptDebugInfo = toFlag (withDebugInfo lbi)
-    , ghcOptExtra = hcOptions GHC bi <> cmmOptions bi
-    , ghcOptObjDir = toFlag odir
-    }
 
 -- | Strip out flags that are not supported in ghci
 filterGhciFlags :: [String] -> [String]

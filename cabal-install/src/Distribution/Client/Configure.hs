@@ -42,7 +42,9 @@ import Distribution.Client.Setup
   , filterConfigureFlags
   )
 import Distribution.Client.SetupWrapper
-  ( SetupScriptOptions (..)
+  ( SetupDependencies (..)
+  , SetupRunnerArgs (NotInLibrary)
+  , SetupScriptOptions (..)
   , defaultSetupScriptOptions
   , setupWrapper
   )
@@ -204,6 +206,7 @@ configure
           configCommonFlags
           (const (return configFlags))
           (const extraArgs)
+          NotInLibrary
       Right installPlan0 ->
         let installPlan = InstallPlan.configureInstallPlan configFlags installPlan0
          in case fst (InstallPlan.ready installPlan) of
@@ -247,7 +250,6 @@ configure
               (flagToMaybe (configCabalVersion configExFlags))
           )
           Nothing
-          False
 
       logMsg message rest = debug verbosity message >> rest
 
@@ -259,7 +261,6 @@ configureSetupScript
   -> SymbolicPath Pkg (Dir Dist)
   -> VersionRange
   -> Maybe Lock
-  -> Bool
   -> InstalledPackageIndex
   -> Maybe ReadyPackage
   -> SetupScriptOptions
@@ -271,7 +272,6 @@ configureSetupScript
   distPref
   cabalVersion
   lock
-  forceExternal
   index
   mpkg =
     SetupScriptOptions
@@ -289,15 +289,15 @@ configureSetupScript
       , useExtraEnvOverrides = []
       , setupCacheLock = lock
       , useWin32CleanHack = False
-      , forceExternalSetupMethod = forceExternal
-      , -- If we have explicit setup dependencies, list them; otherwise, we give
-        -- the empty list of dependencies; ideally, we would fix the version of
-        -- Cabal here, so that we no longer need the special case for that in
-        -- `compileSetupExecutable` in `externalSetupMethod`, but we don't yet
-        -- know the version of Cabal at this point, but only find this there.
-        -- Therefore, for now, we just leave this blank.
-        useDependencies = fromMaybe [] explicitSetupDeps
-      , useDependenciesExclusive = not defaultSetupDeps && isJust explicitSetupDeps
+      , -- If the @custom-setup@ stanza has an explicit list of dependencies,
+        -- use those exclusively. Otherwise, the list is not exhaustive, and
+        -- we have a special case in 'SetupWrapper' to go looking for a Cabal
+        -- library. We don't yet know its version, so for now we leave the list
+        -- of implicit dependencies blank.
+        useSetupDependencies =
+          case explicitSetupDeps of
+            Just deps | not defaultSetupDeps -> ExplicitSetupDeps deps
+            _ -> ImplicitSetupDeps (fromMaybe [] explicitSetupDeps)
       , useVersionMacros = not defaultSetupDeps && isJust explicitSetupDeps
       , isInteractive = False
       , isMainLibOrExeComponent = True
@@ -507,6 +507,7 @@ configurePackage
       configCommonFlags
       (return . configureFlags)
       (const extraArgs)
+      NotInLibrary
     where
       gpkg :: PkgDesc.GenericPackageDescription
       gpkg = srcpkgDescription spkg
@@ -545,10 +546,10 @@ configurePackage
               -- (But if they didn't, let solver decide.)
               configBenchmarks =
                 toFlag (BenchStanzas `optStanzaSetMember` stanzas)
-                  `mappend` configBenchmarks configFlags
+                  <> configBenchmarks configFlags
             , configTests =
                 toFlag (TestStanzas `optStanzaSetMember` stanzas)
-                  `mappend` configTests configFlags
+                  <> configTests configFlags
             }
 
       pkg :: PkgDesc.PackageDescription

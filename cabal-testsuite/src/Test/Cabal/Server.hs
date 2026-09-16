@@ -1,7 +1,7 @@
 {-# LANGUAGE CPP #-}
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE NondecreasingIndentation #-}
-{-# LANGUAGE ScopedTypeVariables #-}
 
 -- | A GHC run-server, which supports running multiple GHC scripts
 -- without having to restart from scratch.
@@ -267,8 +267,7 @@ initServer :: Server -> IO Server
 initServer s0 = do
     -- NB: withProcessHandle reads an MVar and is interruptible
 
-    pid <- withProcessHandle (serverProcessHandle s0) $ \ph ->
-              case ph of
+    pid <- withProcessHandle (serverProcessHandle s0) $ \case
 #if mingw32_HOST_OS
                   OpenHandle x   -> fmap show (Win32.getProcessId x)
 #else

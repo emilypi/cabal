@@ -1,11 +1,6 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DuplicateRecordFields #-}
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE NamedFieldPuns #-}
-{-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ViewPatterns #-}
-
------------------------------------------------------------------------------
 
 -- |
 -- Module      :  Distribution.Simple.Test
@@ -132,7 +127,7 @@ test args verbHandles pkg_descr lbi0 flags = do
     dieWithException verbosity NoTestSuitesEnabled
 
   testsToRun <- case testNames of
-    [] -> return $ zip enabledTests $ repeat Nothing
+    [] -> return $ map (,Nothing) enabledTests
     names -> for names $ \tName ->
       let testMap = zip enabledNames enabledTests
           enabledNames = map (PD.testName . fst) enabledTests
@@ -158,7 +153,7 @@ test args verbHandles pkg_descr lbi0 flags = do
   -- Now, we get the path to the HPC artifacts and exposed modules of each
   -- library by querying the package database keyed by unit-id:
   let coverageFor =
-        nub $
+        ordNub $
           fromFlagOrDefault [] (configCoverageFor (configFlags lbi))
             <> extraCoverageFor lbi
   ipkginfos <- getInstalledPackagesById verbosity lbi MissingCoveredInstalledLibrary coverageFor

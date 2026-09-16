@@ -1,8 +1,7 @@
 {-# LANGUAGE DataKinds #-}
-{-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE DerivingVia #-}
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE PatternSynonyms #-}
-{-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ViewPatterns #-}
 
 -- |
@@ -59,6 +58,7 @@ data InstallFlags = InstallFlags
   , installInPlace :: Flag Bool
   }
   deriving (Show, Generic)
+  deriving (Semigroup, Monoid) via Generically InstallFlags
 
 pattern InstallCommonFlags
   :: Flag VerbosityFlags
@@ -168,16 +168,9 @@ installOptions =
       ( reqArg
           "DATABASE"
           (succeedReadE (Flag . CopyToDb))
-          (\f -> case f of Flag (CopyToDb p) -> [p]; _ -> [])
+          (\case Flag (CopyToDb p) -> [p]; _ -> [])
       )
   ]
 
 emptyInstallFlags :: InstallFlags
 emptyInstallFlags = mempty
-
-instance Monoid InstallFlags where
-  mempty = gmempty
-  mappend = (<>)
-
-instance Semigroup InstallFlags where
-  (<>) = gmappend

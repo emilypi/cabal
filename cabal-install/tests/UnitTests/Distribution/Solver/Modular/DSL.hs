@@ -1,8 +1,5 @@
 {-# LANGUAGE DisambiguateRecordFields #-}
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE TupleSections #-}
 
 -- | DSL for testing the modular solver
 module UnitTests.Distribution.Solver.Modular.DSL
@@ -86,6 +83,7 @@ import Distribution.Client.Dependency
 import qualified Distribution.Client.SolverInstallPlan as CI.SolverInstallPlan
 import Distribution.Client.Types
 
+import Data.Foldable (fold)
 import Distribution.Solver.Types.ComponentDeps (ComponentDeps)
 import qualified Distribution.Solver.Types.ComponentDeps as CD
 import Distribution.Solver.Types.ConstraintSource
@@ -175,7 +173,6 @@ instance Monoid Dependencies where
       , depsIsBuildable = True
       , depsExampleDependencies = []
       }
-  mappend = (<>)
 
 dependencies :: [ExampleDependency] -> Dependencies
 dependencies deps = mempty{depsExampleDependencies = deps}
@@ -417,7 +414,7 @@ exAvSrcPkg ex =
             usedFlags :: Map ExampleFlagName C.PackageFlag
             usedFlags = Map.fromList [(fn, mkDefaultFlag fn) | fn <- names]
               where
-                names = extractFlags $ CD.flatDeps (exAvDeps ex)
+                names = extractFlags $ fold (exAvDeps ex)
          in -- 'declaredFlags' overrides 'usedFlags' to give flags non-default settings:
             Map.elems $ declaredFlags `Map.union` usedFlags
 
@@ -594,19 +591,19 @@ exAvSrcPkg ex =
     extractFlags deps = concatMap go (depsExampleDependencies deps)
       where
         go :: ExampleDependency -> [ExampleFlagName]
-        go (ExAny _) = []
-        go (ExFix _ _) = []
-        go (ExRange _ _ _) = []
-        go (ExSubLibAny _ _) = []
-        go (ExSubLibFix _ _ _) = []
-        go (ExBuildToolAny _ _) = []
-        go (ExBuildToolFix _ _ _) = []
-        go (ExLegacyBuildToolAny _) = []
-        go (ExLegacyBuildToolFix _ _) = []
+        go ExAny{} = []
+        go ExFix{} = []
+        go ExRange{} = []
+        go ExSubLibAny{} = []
+        go ExSubLibFix{} = []
+        go ExBuildToolAny{} = []
+        go ExBuildToolFix{} = []
+        go ExLegacyBuildToolAny{} = []
+        go ExLegacyBuildToolFix{} = []
         go (ExFlagged f a b) = f : extractFlags a ++ extractFlags b
-        go (ExExt _) = []
-        go (ExLang _) = []
-        go (ExPkg _) = []
+        go ExExt{} = []
+        go ExLang{} = []
+        go ExPkg{} = []
 
     -- Convert 'Dependencies' into a tree of a specific component type, using
     -- the given top level component and function for creating a component at
@@ -796,7 +793,7 @@ exResolve
   -> FineGrainedConflicts
   -> MinimizeConflictSet
   -> IndependentGoals
-  -> PreferOldest
+  -> PreferVersion
   -> ReorderGoals
   -> AllowBootLibInstalls
   -> OnlyConstrained
@@ -820,7 +817,7 @@ exResolve
   fineGrainedConflicts
   minimizeConflictSet
   indepGoals
-  prefOldest
+  prefVersion
   reorder
   allowBootLibInstalls
   onlyConstrained
@@ -859,23 +856,27 @@ exResolve
         | otherwise = []
       targets' = fmap (\p -> NamedPackage (C.mkPackageName p) []) targets
       params =
-        addConstraints (fmap toConstraint constraints) $
-          addConstraints (fmap toLpc enableTests) $
-            addPreferences (fmap toPref prefs) $
-              setCountConflicts countConflicts $
-                setFineGrainedConflicts fineGrainedConflicts $
-                  setMinimizeConflictSet minimizeConflictSet $
-                    setIndependentGoals indepGoals $
-                      (if asBool prefOldest then setPreferenceDefault PreferAllOldest else id) $
-                        setReorderGoals reorder $
-                          setMaxBackjumps mbj $
-                            setAllowBootLibInstalls allowBootLibInstalls $
-                              setOnlyConstrained onlyConstrained $
-                                setEnableBackjumping enableBj $
-                                  setSolveExecutables solveExes $
-                                    setGoalOrder goalOrder $
-                                      setSolverVerbosity (C.verbosityLevel verbosity) $
-                                        standardInstallPolicy instIdx avaiIdx targets'
+        addConstraints (fmap toConstraint constraints)
+          $ addConstraints (fmap toLpc enableTests)
+          $ addPreferences (fmap toPref prefs)
+          $ setCountConflicts countConflicts
+          $ setFineGrainedConflicts fineGrainedConflicts
+          $ setMinimizeConflictSet minimizeConflictSet
+          $ setIndependentGoals indepGoals
+          $ ( case prefVersion of
+                PreferOldest -> setPreferenceDefault PreferAllOldest
+                PreferLatest -> setPreferenceDefault PreferAllLatest
+                PreferInstalledOrLatest -> setPreferenceDefault PreferLatestForSelected
+            )
+          $ setReorderGoals reorder
+          $ setMaxBackjumps mbj
+          $ setAllowBootLibInstalls allowBootLibInstalls
+          $ setOnlyConstrained onlyConstrained
+          $ setEnableBackjumping enableBj
+          $ setSolveExecutables solveExes
+          $ setGoalOrder goalOrder
+          $ setSolverVerbosity (C.verbosityLevel verbosity)
+          $ standardInstallPolicy instIdx avaiIdx targets'
       toLpc pc = LabeledPackageConstraint pc ConstraintSourceUnknown
 
       toConstraint (ExVersionConstraint scope v) =

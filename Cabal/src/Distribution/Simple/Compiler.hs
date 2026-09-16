@@ -1,8 +1,4 @@
 {-# LANGUAGE DataKinds #-}
-{-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE DeriveTraversable #-}
-
------------------------------------------------------------------------------
 
 -- |
 -- Module      :  Distribution.Simple.Compiler
@@ -86,6 +82,7 @@ module Distribution.Simple.Compiler
   , libraryDynDirSupported
   , libraryVisibilitySupported
   , jsemSupported
+  , jsemVersion
   , reexportedAsSupported
 
     -- * Support for profiling detail levels
@@ -480,6 +477,15 @@ jsemSupported comp = case compilerFlavor comp of
   where
     v = compilerVersion comp
 
+-- | What semaphore protocol version does this compiler use?
+--
+-- Returns @Nothing@ for compilers that don't report a "Semaphore version"
+-- field in @ghc --info@ (i.e. GHC 9.8–9.14, which use v1).
+jsemVersion :: Compiler -> Maybe Int
+jsemVersion comp = case compilerFlavor comp of
+  GHC -> Map.lookup "Semaphore version" (compilerProperties comp) >>= readMaybe
+  _ -> Nothing
+
 -- | Does the compiler support the -reexported-modules "A as B" syntax
 reexportedAsSupported :: Compiler -> Bool
 reexportedAsSupported comp = case compilerFlavor comp of
@@ -492,15 +498,8 @@ reexportedAsSupported comp = case compilerFlavor comp of
 -- "dynamic-library-dirs"?
 libraryDynDirSupported :: Compiler -> Bool
 libraryDynDirSupported comp = case compilerFlavor comp of
-  GHC ->
-    -- Not just v >= mkVersion [8,0,1,20161022], as there
-    -- are many GHC 8.1 nightlies which don't support this.
-    ( (v >= mkVersion [8, 0, 1, 20161022] && v < mkVersion [8, 1])
-        || v >= mkVersion [8, 1, 20161021]
-    )
+  GHC -> True
   _ -> False
-  where
-    v = compilerVersion comp
 
 -- | Does this compiler's "ar" command supports response file
 -- arguments (i.e. @file-style arguments).

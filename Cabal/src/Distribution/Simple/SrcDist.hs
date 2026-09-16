@@ -1,8 +1,4 @@
 {-# LANGUAGE DataKinds #-}
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE RankNTypes #-}
-
------------------------------------------------------------------------------
 
 -- NOTE: FIX: we don't have a great way of testing this module, since
 -- we can't easily look inside a tarball once its created.
@@ -276,13 +272,13 @@ listPackageSources' verbosity rip mbWorkDir pkg_descr pps =
         . withAllLib
         $ \l -> do
           let lbi = libBuildInfo l
-              incls = fmap getSymbolicPath $ filter (`notElem` autogenIncludes lbi) (installIncludes lbi)
+              incls = getSymbolicPath <$> filter (`notElem` autogenIncludes lbi) (installIncludes lbi)
               relincdirs = fmap getSymbolicPath $ sameDirectory : mapMaybe symbolicPathRelative_maybe (includeDirs lbi)
           traverse (fmap (makeSymbolicPath . snd) . findIncludeFile verbosity cwd relincdirs) incls
     , -- Setup script, if it exists.
-      fmap (maybe [] (\f -> [makeSymbolicPath f])) $ findSetupFile cwd
+      maybe [] (\f -> [makeSymbolicPath f]) <$> findSetupFile cwd
     , -- SetupHooks script, if it exists.
-      fmap (maybe [] (\f -> [makeSymbolicPath f])) $ findSetupHooksFile cwd
+      maybe [] (\f -> [makeSymbolicPath f]) <$> findSetupHooksFile cwd
     , -- The .cabal file itself.
       fmap (\d -> [d]) (coerceSymbolicPath . relativeSymbolicPath <$> tryFindPackageDesc verbosity mbWorkDir)
     ]
@@ -311,7 +307,7 @@ prepareTree
   -> IO ()
 prepareTree verbosity mbWorkDir pkg_descr0 targetDir pps = do
   ordinary <- listPackageSources verbosity mbWorkDir pkg_descr pps
-  installOrdinaryFiles verbosity targetDir (zip (repeat []) $ map i ordinary)
+  installOrdinaryFiles verbosity targetDir (map (([],) . i) ordinary)
   maybeCreateDefaultSetupScript targetDir
   where
     i = interpretSymbolicPath mbWorkDir -- See Note [Symbolic paths] in Distribution.Utils.Path
@@ -428,7 +424,7 @@ filterAutogenModules pkg_descr0 =
         }
     pathsModule = autogenPathsModuleName pkg_descr0
     packageInfoModule = autogenPackageInfoModuleName pkg_descr0
-    filterFunction bi = \mn ->
+    filterFunction bi mn =
       mn /= pathsModule
         && mn /= packageInfoModule
         && notElem mn (autogenModules bi)

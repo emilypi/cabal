@@ -1,5 +1,3 @@
-{-# LANGUAGE DeriveGeneric      #-}
------------------------------------------------------------------------------
 -- |
 -- Module      :  Distribution.Solver.Types.PkgConfigDb
 -- Copyright   :  (c) Iñaki García Etxebarria 2016
@@ -9,7 +7,6 @@
 -- Portability :  portable
 --
 -- Read the list of packages available to pkg-config.
------------------------------------------------------------------------------
 module Distribution.Solver.Types.PkgConfigDb
     ( PkgConfigDb (..)
     , readPkgConfigDb
@@ -82,17 +79,16 @@ readPkgConfigDb verbosity progdb = handle ioErrorHandler $ do
               . filter (either (const True) (not . null))
               -- Try decoding strictly; if it fails, put the lenient
               -- decoding in a Left for later reporting.
-              . map (\bsname ->
-                       let sbsname = LBS.toStrict bsname
-                       in case T.decodeUtf8' sbsname of
-                            Left _ -> Left (T.unpack (decodeUtf8LenientCompat sbsname))
-                            Right name -> Right (T.unpack name))
               -- The output of @pkg-config --list-all@ also includes a
               -- description for each package, which we do not need.
               -- We don't use Data.Char.isSpace because that would also
               -- include 0xA0, the non-breaking space, which can occur
               -- in multi-byte UTF-8 sequences.
-              . map (LBS.takeWhile (not . isAsciiSpace))
+              . map ((\bsname ->
+                       let sbsname = LBS.toStrict bsname
+                       in case T.decodeUtf8' sbsname of
+                            Left _ -> Left (T.unpack (decodeUtf8LenientCompat sbsname))
+                            Right name -> Right (T.unpack name)) . LBS.takeWhile (not . isAsciiSpace))
               $ pkgList
         unless (null failedPkgNames) $
           info verbosity ("Some pkg-config packages have names containing invalid unicode: " ++ intercalate ", " failedPkgNames)
@@ -110,7 +106,7 @@ readPkgConfigDb verbosity progdb = handle ioErrorHandler $ do
           -- one package version, so if the returned list is shorter than the
           -- requested one, we fall back to querying one by one.
           do
-            info verbosity ("call to pkg-config --modversion on all packages failed. Falling back to querying pkg-config individually on each package")
+            info verbosity "call to pkg-config --modversion on all packages failed. Falling back to querying pkg-config individually on each package"
             Just . pkgConfigDbFromList . catMaybes <$> mapM (getIndividualVersion pkgConfig) pkgNames
   where
     -- For when pkg-config invocation fails (possibly because of a

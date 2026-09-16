@@ -1,8 +1,6 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE PatternSynonyms #-}
-{-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE TypeApplications #-}
 
 -- |
 -- Module      :  Main
@@ -101,6 +99,7 @@ import Distribution.Client.Config
   ( SavedConfig (..)
   , createDefaultConfigFile
   , defaultConfigFile
+  , defaultUserInstall
   , getConfigFilePath
   , loadConfig
   , userConfigDiff
@@ -111,7 +110,8 @@ import qualified Distribution.Client.List as List
   , list
   )
 import Distribution.Client.SetupWrapper
-  ( SetupScriptOptions (..)
+  ( SetupRunnerArgs (NotInLibrary)
+  , SetupScriptOptions (..)
   , defaultSetupScriptOptions
   , setupWrapper
   )
@@ -164,7 +164,7 @@ import Distribution.Client.Signal
   ( installTerminationHandler
   )
 import Distribution.Client.Tar (createTarGzFile)
-import Distribution.Client.Types.Credentials (Password (..))
+import Distribution.Client.Types.Credentials (Password (..), Token (..))
 import qualified Distribution.Client.Upload as Upload
 import Distribution.Client.Utils
   ( determineNumJobs
@@ -184,7 +184,6 @@ import Distribution.PackageDescription
 
 import Distribution.Client.Errors
 import Distribution.Compat.ResponseFile
-import qualified Distribution.Make as Make
 import Distribution.PackageDescription.PrettyPrint
   ( writeGenericPackageDescription
   )
@@ -233,6 +232,7 @@ import Distribution.Simple.Utils
   , createDirectoryIfMissingVerbose
   , die'
   , dieNoVerbosity
+  , dieNoWrap
   , dieWithException
   , findPackageDesc
   , info
@@ -322,7 +322,7 @@ main args = do
   -- for more information.
   let (args0, args1) = break (== "--") args
 
-  mainWorker =<< (++ args1) <$> expandResponse args0
+  mainWorker . (++ args1) =<< expandResponse args0
 
 -- | Check whether assertions are enabled and print a warning in that case.
 warnIfAssertionsAreEnabled :: IO ()
@@ -519,7 +519,7 @@ regularCmd
   -> (flags -> [String] -> action)
   -> CommandSpec action
 regularCmd ui action =
-  CommandSpec ui ((flip commandAddAction) action) NormalCommand
+  CommandSpec ui (`commandAddAction` action) NormalCommand
 
 hiddenCmd
   :: CommandUI flags
@@ -537,7 +537,7 @@ wrapperCmd
   -> (flags -> CommonSetupFlags)
   -> CommandSpec Action
 wrapperCmd ui getCommonFlags =
-  CommandSpec ui (\ui' -> wrapperAction ui' getCommonFlags) NormalCommand
+  CommandSpec ui (`wrapperAction` getCommonFlags) NormalCommand
 
 wrapperAction
   :: Monoid flags
@@ -572,6 +572,7 @@ wrapperAction command getCommonFlags =
         getCommonFlags
         (const (return flags))
         (const extraArgs)
+        NotInLibrary
 
 configureAction
   :: (ConfigFlags, ConfigExFlags)
@@ -589,9 +590,9 @@ configureAction (configFlags, configExFlags) extraArgs globalFlags = do
       <$> loadConfigOrSandboxConfig verbosity globalFlags
   distPref <- getSymbolicPath <$> findSavedDistPref config (setupDistPref common)
 
-  let configFlags' = savedConfigureFlags config `mappend` configFlags
-      configExFlags' = savedConfigureExFlags config `mappend` configExFlags
-      globalFlags' = savedGlobalFlags config `mappend` globalFlags
+  let configFlags' = savedConfigureFlags config <> configFlags
+      configExFlags' = savedConfigureExFlags config <> configExFlags
+      globalFlags' = savedGlobalFlags config <> globalFlags
   (comp, platform, progdb) <- configCompilerAuxEx (verbosityHandles verbosity) configFlags'
 
   writeConfigFlags verbosity distPref (configFlags', configExFlags')
@@ -600,7 +601,7 @@ configureAction (configFlags, configExFlags) extraArgs globalFlags = do
   let packageDBs :: PackageDBStack
       packageDBs =
         interpretPackageDbFlags
-          (fromFlag (configUserInstall configFlags'))
+          (fromFlagOrDefault defaultUserInstall (configUserInstall configFlags'))
           (configPackageDBs configFlags')
 
   withRepoContext verbosity globalFlags' $ \repoContext ->
@@ -687,6 +688,7 @@ build verbosity config distPref buildFlags extraArgs =
     buildCommonFlags
     (return . mkBuildFlags)
     (const extraArgs)
+    NotInLibrary
   where
     progDb = defaultProgramDb
     setupOptions = defaultSetupScriptOptions{useDistPref = distPref}
@@ -727,7 +729,7 @@ filterBuildFlags' version config buildFlags
         { -- Take the 'jobs' setting config file into account.
           buildNumJobs =
             Flag . Just . determineNumJobs $
-              (numJobsConfigFlag `mappend` numJobsCmdLineFlag)
+              (numJobsConfigFlag <> numJobsCmdLineFlag)
         }
     numJobsConfigFlag = installNumJobs . savedInstallFlags $ config
     numJobsCmdLineFlag = buildNumJobs buildFlags
@@ -782,6 +784,7 @@ replAction replFlags extraArgs globalFlags = do
         Cabal.replCommonFlags
         (const (return replFlags'))
         (const extraArgs)
+        NotInLibrary
 
     -- No .cabal file in the current directory: just start the REPL (possibly
     -- using the sandbox package DB).
@@ -831,6 +834,7 @@ installAction (configFlags, _, installFlags, _, _, _) _ globalFlags
         (const common)
         (const (return (mempty, mempty, mempty, mempty, mempty, mempty)))
         (const [])
+        NotInLibrary
 installAction
   ( configFlags
     , configExFlags
@@ -858,7 +862,7 @@ installAction
       let configFlags' =
             maybeForceTests installFlags' $
               savedConfigureFlags config
-                `mappend` configFlags
+                <> configFlags
                   { configCommonFlags =
                       (configCommonFlags configFlags)
                         { setupDistPref = toFlag dist
@@ -866,16 +870,16 @@ installAction
                   }
           configExFlags' =
             defaultConfigExFlags
-              `mappend` savedConfigureExFlags config
-              `mappend` configExFlags
+              <> savedConfigureExFlags config
+              <> configExFlags
           installFlags' =
             defaultInstallFlags
-              `mappend` savedInstallFlags config
-              `mappend` installFlags
+              <> savedInstallFlags config
+              <> installFlags
           haddockFlags' =
             defaultHaddockFlags
-              `mappend` savedHaddockFlags config
-              `mappend` haddockFlags
+              <> savedHaddockFlags config
+              <> haddockFlags
                 { haddockCommonFlags =
                     (haddockCommonFlags haddockFlags)
                       { setupDistPref = toFlag dist
@@ -883,8 +887,8 @@ installAction
                 }
           testFlags' =
             Cabal.defaultTestFlags
-              `mappend` savedTestFlags config
-              `mappend` testFlags
+              <> savedTestFlags config
+              <> testFlags
                 { testCommonFlags =
                     (testCommonFlags testFlags)
                       { setupDistPref = toFlag dist
@@ -892,14 +896,14 @@ installAction
                 }
           benchmarkFlags' =
             Cabal.defaultBenchmarkFlags
-              `mappend` savedBenchmarkFlags config
-              `mappend` benchmarkFlags
+              <> savedBenchmarkFlags config
+              <> benchmarkFlags
                 { benchmarkCommonFlags =
                     (benchmarkCommonFlags benchmarkFlags)
                       { setupDistPref = toFlag dist
                       }
                 }
-          globalFlags' = savedGlobalFlags config `mappend` globalFlags
+          globalFlags' = savedGlobalFlags config <> globalFlags
       (comp, platform, progdb) <- configCompilerAux' configFlags'
 
       -- TODO: Redesign ProgramDB API to prevent such problems as #2241 in the
@@ -984,7 +988,7 @@ testAction (buildFlags, testFlags) extraArgs globalFlags = do
       mbWorkDir
       distPref
       "test suites"
-      (\c -> case c of LBI.CTest{} -> True; _ -> False)
+      (\case LBI.CTest{} -> True; _ -> False)
 
   let extraArgs'
         | null extraArgs = case names of
@@ -1004,6 +1008,7 @@ testAction (buildFlags, testFlags) extraArgs globalFlags = do
     Cabal.testCommonFlags
     (const (return testFlags'))
     (const extraArgs')
+    NotInLibrary
 
 data ComponentNames
   = ComponentNamesUnknown
@@ -1025,7 +1030,7 @@ componentNamesFromLBI verbosity mbWorkDir distPref targetsDescr compPred = do
       -- Note: the build config could have been generated by a custom setup
       -- script built against a different Cabal version, so it's crucial that
       -- we ignore the bad version error here.
-      ConfigStateFileBadVersion _ _ _ -> return ComponentNamesUnknown
+      ConfigStateFileBadVersion{} -> return ComponentNamesUnknown
       _ -> dieWithException verbosity $ ConfigStateFileException (show err)
     Right lbi -> do
       let pkgDescr = LBI.localPkgDescr lbi
@@ -1041,7 +1046,7 @@ componentNamesFromLBI verbosity mbWorkDir distPref targetsDescr compPred = do
               ++ targetsDescr
               ++ "."
           exitSuccess -- See #3215.
-        else return $! (ComponentNames names)
+        else return $! ComponentNames names
 
 benchmarkAction
   :: (BuildFlags, BenchmarkFlags)
@@ -1107,7 +1112,7 @@ benchmarkAction
         mbWorkDir
         distPref
         "benchmarks"
-        (\c -> case c of LBI.CBench{} -> True; _ -> False)
+        (\case LBI.CBench{} -> True; _ -> False)
 
     let extraArgs'
           | null extraArgs = case names of
@@ -1127,6 +1132,7 @@ benchmarkAction
       Cabal.benchmarkCommonFlags
       (const (return benchmarkFlags'))
       (const extraArgs')
+      NotInLibrary
 
 haddockAction :: HaddockFlags -> [String] -> Action
 haddockAction haddockFlags extraArgs globalFlags = do
@@ -1151,8 +1157,8 @@ haddockAction haddockFlags extraArgs globalFlags = do
   let mbWorkDir = flagToMaybe $ setupWorkingDir common
       haddockFlags' =
         defaultHaddockFlags
-          `mappend` savedHaddockFlags config'
-          `mappend` haddockFlags
+          <> savedHaddockFlags config'
+          <> haddockFlags
             { haddockCommonFlags =
                 (haddockCommonFlags haddockFlags)
                   { setupDistPref = toFlag distPref
@@ -1171,6 +1177,7 @@ haddockAction haddockFlags extraArgs globalFlags = do
     haddockCommonFlags
     (const (return haddockFlags'))
     (const extraArgs)
+    NotInLibrary
 
   when (haddockForHackage haddockFlags == Flag ForHackage) $ do
     pkg <- fmap LBI.localPkgDescr (getPersistBuildConfig mbWorkDir distPref)
@@ -1210,6 +1217,7 @@ cleanAction cleanFlags extraArgs globalFlags = do
     cleanCommonFlags
     (const (return cleanFlags'))
     (const extraArgs)
+    NotInLibrary
 
 listAction :: ListFlags -> [String] -> Action
 listAction listFlags extraArgs globalFlags = do
@@ -1222,10 +1230,10 @@ listAction listFlags extraArgs globalFlags = do
         configFlags'
           { configPackageDBs =
               configPackageDBs configFlags'
-                `mappend` listPackageDBs listFlags
+                <> listPackageDBs listFlags
           , configHcPath = listHcPath listFlags
           }
-      globalFlags' = savedGlobalFlags config `mappend` globalFlags
+      globalFlags' = savedGlobalFlags config <> globalFlags
   compProgdb <-
     if listNeedsCompiler listFlags
       then do
@@ -1253,9 +1261,9 @@ infoAction infoFlags extraArgs globalFlags = do
         configFlags'
           { configPackageDBs =
               configPackageDBs configFlags'
-                `mappend` infoPackageDBs infoFlags
+                <> infoPackageDBs infoFlags
           }
-      globalFlags' = savedGlobalFlags config `mappend` globalFlags
+      globalFlags' = savedGlobalFlags config <> globalFlags
   (comp, _, progdb) <- configCompilerAuxEx defaultVerbosityHandles configFlags
   withRepoContext verbosity globalFlags' $ \repoContext ->
     List.info
@@ -1276,7 +1284,7 @@ fetchAction fetchFlags extraArgs globalFlags = do
   targets <- readUserTargets verbosity extraArgs
   config <- loadConfig verbosity (globalConfigFile globalFlags)
   let configFlags = savedConfigureFlags config
-      globalFlags' = savedGlobalFlags config `mappend` globalFlags
+      globalFlags' = savedGlobalFlags config <> globalFlags
   (comp, platform, progdb) <- configCompilerAux' configFlags
   withRepoContext verbosity globalFlags' $ \repoContext ->
     fetch
@@ -1297,7 +1305,7 @@ freezeAction freezeFlags _extraArgs globalFlags = do
           fromFlag (freezeVerbosity freezeFlags)
   config <- loadConfigOrSandboxConfig verbosity globalFlags
   let configFlags = savedConfigureFlags config
-      globalFlags' = savedGlobalFlags config `mappend` globalFlags
+      globalFlags' = savedGlobalFlags config <> globalFlags
   (comp, platform, progdb) <- configCompilerAux' configFlags
 
   withRepoContext verbosity globalFlags' $ \repoContext ->
@@ -1318,7 +1326,7 @@ genBoundsAction freezeFlags _extraArgs globalFlags = do
           fromFlag (freezeVerbosity freezeFlags)
   config <- loadConfigOrSandboxConfig verbosity globalFlags
   let configFlags = savedConfigureFlags config
-      globalFlags' = savedGlobalFlags config `mappend` globalFlags
+      globalFlags' = savedGlobalFlags config <> globalFlags
   (comp, platform, progdb) <- configCompilerAux' configFlags
 
   withRepoContext verbosity globalFlags' $ \repoContext ->
@@ -1335,13 +1343,21 @@ genBoundsAction freezeFlags _extraArgs globalFlags = do
 uploadAction :: UploadFlags -> [String] -> Action
 uploadAction uploadFlags extraArgs globalFlags = do
   config <- loadConfig verbosity (globalConfigFile globalFlags)
-  let uploadFlags' = savedUploadFlags config `mappend` uploadFlags
-      globalFlags' = savedGlobalFlags config `mappend` globalFlags
+  let uploadFlags' = savedUploadFlags config <> uploadFlags
+      globalFlags' = savedGlobalFlags config <> globalFlags
       tarfiles = extraArgs
       chosenRepo = flagToMaybe $ uploadRepoName uploadFlags'
   when (null tarfiles && not (fromFlag (uploadDoc uploadFlags'))) $
     dieWithException verbosity UploadAction
   checkTarFiles extraArgs
+  maybe_token <-
+    case uploadTokenCmd uploadFlags' of
+      Flag (xs : xss) ->
+        Just . Token
+          <$> getProgramInvocationOutput
+            verbosity
+            (simpleProgramInvocation xs xss)
+      _ -> pure $ flagToMaybe $ uploadToken uploadFlags'
   maybe_password <-
     case uploadPasswordCmd uploadFlags' of
       Flag (xs : xss) ->
@@ -1360,7 +1376,7 @@ uploadAction uploadFlags extraArgs globalFlags = do
         Upload.uploadDoc
           verbosity
           filteredRepoContext
-          (flagToMaybe $ uploadToken uploadFlags')
+          maybe_token
           (flagToMaybe $ uploadUsername uploadFlags')
           maybe_password
           (fromFlag (uploadCandidate uploadFlags'))
@@ -1369,7 +1385,7 @@ uploadAction uploadFlags extraArgs globalFlags = do
         Upload.upload
           verbosity
           filteredRepoContext
-          (flagToMaybe $ uploadToken uploadFlags')
+          maybe_token
           (flagToMaybe $ uploadUsername uploadFlags')
           maybe_password
           (fromFlag (uploadCandidate uploadFlags'))
@@ -1439,8 +1455,8 @@ reportAction reportFlags extraArgs globalFlags = do
     dieWithException verbosity $
       ReportAction extraArgs
   config <- loadConfig verbosity (globalConfigFile globalFlags)
-  let globalFlags' = savedGlobalFlags config `mappend` globalFlags
-      reportFlags' = savedReportFlags config `mappend` reportFlags
+  let globalFlags' = savedGlobalFlags config <> globalFlags
+      reportFlags' = savedReportFlags config <> reportFlags
       chosenRepo = flagToMaybe $ reportRepoName reportFlags'
   withRepoContext verbosity globalFlags' $ \repoContext -> do
     filteredRepoContext <- chooseRepo verbosity repoContext (unRepoName <$> chosenRepo)
@@ -1484,7 +1500,7 @@ getAction getFlags extraArgs globalFlags = do
           fromFlag (getVerbosity getFlags)
   targets <- readUserTargets verbosity extraArgs
   config <- loadConfigOrSandboxConfig verbosity globalFlags
-  let globalFlags' = savedGlobalFlags config `mappend` globalFlags
+  let globalFlags' = savedGlobalFlags config <> globalFlags
       chosenRepo = flagToMaybe $ getRepoName getFlags
   withRepoContext verbosity (savedGlobalFlags config) $ \repoContext -> do
     filteredRepoContext <- chooseRepo verbosity repoContext (unRepoName <$> chosenRepo)
@@ -1513,9 +1529,9 @@ initAction initFlags extraArgs globalFlags = do
     initAction' = do
       confFlags <- loadConfigOrSandboxConfig verbosity globalFlags
       -- override with `--with-compiler` from CLI if available
-      let confFlags' = savedConfigureFlags confFlags `mappend` compFlags
-          initFlags' = savedInitFlags confFlags `mappend` initFlags
-          globalFlags' = savedGlobalFlags confFlags `mappend` globalFlags
+      let confFlags' = savedConfigureFlags confFlags <> compFlags
+          initFlags' = savedInitFlags confFlags <> initFlags
+          globalFlags' = savedGlobalFlags confFlags <> globalFlags
 
       (comp, _, progdb) <- configCompilerAux' confFlags'
 
@@ -1544,7 +1560,7 @@ userConfigAction ucflags extraArgs globalFlags = do
     ("init" : _) -> do
       path <- getConfigFilePath verbosity (globalConfigFile globalFlags)
       fileExists <- doesFileExist path
-      if (not fileExists || (fileExists && frc))
+      if not fileExists || (fileExists && frc)
         then void $ createDefaultConfigFile verbosity extraLines path
         else dieWithException verbosity $ UserConfigAction path
     ("diff" : _) -> traverse_ putStrLn =<< userConfigDiff verbosity globalFlags extraLines
@@ -1565,9 +1581,14 @@ actAsSetupAction actAsSetupFlags args _globalFlags =
             Simple.autoconfSetupHooks
             defaultVerbosityHandles
             args
-        Make -> Make.defaultMainArgs args
-        Hooks -> error "actAsSetupAction Hooks"
-        Custom -> error "actAsSetupAction Custom"
+        Make -> unsupportedBuildType
+        Hooks -> unsupportedBuildType
+        Custom -> unsupportedBuildType
+  where
+    verbosity = mkVerbosity defaultVerbosityHandles normal
+    unsupportedBuildType = do
+      warn verbosity "act-as-setup accepts --build-type=Simple|Configure, case-sensitively."
+      dieNoWrap verbosity "act-as-setup doesn't accept --build-type=Make|Hooks|Custom."
 
 manpageAction :: [CommandSpec action] -> ManpageFlags -> [String] -> Action
 manpageAction commands flags extraArgs _ = do

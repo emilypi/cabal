@@ -22,7 +22,6 @@ module Distribution.Client.Init.NonInteractive.Heuristics
   , guessAuthorName
   , guessAuthorEmail
   , guessCabalSpecVersion
-  , guessLanguage
   , guessPackageType
   , guessSourceDirectories
   , guessApplicationDirectories
@@ -32,6 +31,7 @@ import Distribution.Client.Compat.Prelude hiding (many, readFile, (<|>))
 
 import Distribution.Simple.Setup (fromFlagOrDefault)
 
+import Data.Functor ((<&>))
 import qualified Data.List as L
 import qualified Data.Set as Set
 import Distribution.CabalSpecVersion
@@ -40,10 +40,9 @@ import Distribution.Client.Init.FlagExtractors (getCabalVersionNoPrompt)
 import Distribution.Client.Init.Types
 import Distribution.Client.Init.Utils
 import Distribution.FieldGrammar.Newtypes
-import Distribution.Simple.Compiler
+import Distribution.Simple.Utils (ordNub)
 import Distribution.Types.PackageName (PackageName)
 import Distribution.Version
-import Language.Haskell.Extension
 import System.FilePath
 
 -- | Guess the main file, returns a default value if none is found.
@@ -70,15 +69,6 @@ guessCabalSpecVersion = do
       [x, y, _] -> cabalSpecFromVersionDigits [x, y]
       _ -> Just defaultCabalVersion
     Nothing -> pure defaultCabalVersion
-
--- | Guess the language specification based on the GHC version
-guessLanguage :: Interactive m => Compiler -> m Language
-guessLanguage Compiler{compilerId = CompilerId GHC ver} =
-  return $
-    if ver < mkVersion [7, 0, 1]
-      then Haskell98
-      else Haskell2010
-guessLanguage _ = return defaultLanguage
 
 -- | Guess the package name based on the given root directory.
 guessPackageName :: Interactive m => FilePath -> m PackageName
@@ -144,17 +134,16 @@ guessApplicationDirectories flags = do
   let candidates = [defaultApplicationDir, "app", "src-exe"]
    in return $ case [y | x <- candidates, y <- pkgDirsContents, x == y] of
         [] -> [defaultApplicationDir]
-        x -> map (</> pkgDirs) . nub $ x
+        x -> map (</> pkgDirs) (ordNub x)
 
 -- | Try to guess the source directories, using a default value as fallback.
 guessSourceDirectories :: Interactive m => InitFlags -> m [FilePath]
 guessSourceDirectories flags = do
   pkgDir <- fromFlagOrDefault getCurrentDirectory $ return <$> packageDir flags
 
-  doesDirectoryExist (pkgDir </> "src")
-    >>= return . \case
-      False -> [defaultSourceDir]
-      True -> ["src"]
+  doesDirectoryExist (pkgDir </> "src") <&> \case
+    False -> [defaultSourceDir]
+    True -> ["src"]
 
 -- | Guess author and email using git configuration options.
 guessAuthorName :: Interactive m => m (Maybe String)
